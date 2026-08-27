@@ -1,0 +1,22 @@
+# =============================================================================
+# Results are large real-data outputs (hundreds of MB) — kept on disk but NOT
+# versioned here. Curated summaries live in docs/ and ARE committed instead.
+# To version a specific result deliberately, force-add it: `git add -f <path>`.
+# =============================================================================
+Simulated_data/results/*
+TCGA_test/results/*
+# ...but keep the (otherwise-empty) results/ folders in the repo so the
+# directory structure stays visible:
+!Simulated_data/results/.gitkeep
+!Simulated_data/results/calibration_test*.out
+!TCGA_test/results/.gitkeep
+!TCGA_test/results/null_calibration*.out
+
+# R session / run artifacts
+.Rhistory
+.RData
+.Rproj.user/
+*.Rout
+
+docs/literature_roadmap.md
+docs/noise_model_labbook.md
