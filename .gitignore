@@ -20,3 +20,5 @@ TCGA_test/results/*
 
 docs/literature_roadmap.md
 docs/noise_model_labbook.md
+
+sync_scripts.sh

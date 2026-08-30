@@ -97,6 +97,12 @@ load_or_install("dplyr")
 load_or_install("goftest")               # Anderson-Darling / Cramer-von Mises GoF tests
 load_or_install("parallel")              # mclapply -- fork-based parallel run sweep
 
+# MASS provides glm.nb (used by the Poisson-vs-NB count-distribution test). Ensure it
+# is installed but do NOT attach it -- MASS::select would mask dplyr::select, which the
+# summary block relies on. We call MASS::glm.nb fully qualified instead.
+if (!requireNamespace("MASS", quietly = TRUE))
+  install.packages("MASS", repos = "https://cloud.r-project.org", lib = LIB_DIR)
+
 # Each fork must run single-threaded: the TOX Fortran uses OpenMP `do concurrent`,
 # so N_CORES forks x N_CORES OpenMP threads would oversubscribe (e.g. 32x32 = 1024
 # threads) and run SLOWER than serial. The mclapply forks provide the parallelism.
@@ -139,14 +145,19 @@ CALIB_CANCERS <- CANCER_TYPES[c("kidney cancer",
                                 "stomach cancer")]
 CALIB_STAGES  <- STAGES                 # restrict for speed, e.g. c("Stage I")
 
-# TOX arms: each is a (norm, trim, label). Residual-pool trimming is a RAW-only
-# knob (the Fortran ignores trim_frac under log norm), so we A/B it on the raw
-# arm and leave log untrimmed. Drop the trim05 arm to skip the comparison.
+# TOX arms: each is a (norm, trim, shared, label). Residual-pool trimming is a RAW-only
+# knob (the Fortran ignores trim_frac under log norm), so we A/B it on the raw arm and
+# leave log untrimmed. `shared = TRUE` runs TOX on the SAME gene set edgeR/limma use
+# (the cohort-level filterByExpr keep mask, intersected with the TPM genes) instead of
+# TOX's own compute_gene_keep_mask filter — an apples-to-apples run where every method
+# sees the exact same genes. Drop arms to skip comparisons.
 TOX_ARMS <- list(
-  list(norm = "log", trim = 0.0,  label = "TOX-log"),
-  list(norm = "raw", trim = 0.0,  label = "TOX-raw"),
-  list(norm = "raw", trim = 0.01, label = "TOX-raw-trim01"),
-  list(norm = "raw", trim = 0.02, label = "TOX-raw-trim02")
+  list(norm = "log", trim = 0.0,  shared = FALSE, label = "TOX-log"),
+  list(norm = "raw", trim = 0.0,  shared = FALSE, label = "TOX-raw"),
+  list(norm = "raw", trim = 0.01, shared = FALSE, label = "TOX-raw-trim01"),
+  list(norm = "raw", trim = 0.02, shared = FALSE, label = "TOX-raw-trim02"),
+  list(norm = "log", trim = 0.0,  shared = TRUE,  label = "TOX-log-degfilt"),
+  list(norm = "raw", trim = 0.0,  shared = TRUE,  label = "TOX-raw-degfilt")
 )
 
 # Which methods to run.
@@ -163,6 +174,13 @@ N_SPLITS         <- 100L                 # runs for TOX / edgeR / limma
 N_CORES          <- 32L                  # cores for the parallel (mclapply) run sweep
 MIN_SAMPLES      <- 16L                  # need enough samples for the full half split
 ALPHAS           <- c(0.05, 0.01)
+
+# Count-distribution diagnostic: is the raw TCGA count data Poisson or Negative
+# Binomial? Runs once per cohort on the raw counts (independent of the null splits).
+# See test_count_distribution().
+RUN_DIST_TEST    <- TRUE
+DIST_MIN_MEAN    <- 5                     # min mean raw count for a gene to be testable
+DIST_MAX_GENES   <- 1500L                 # cap tested genes per cohort (glm.nb is iterative)
 
 # Replicate-count sweep. Besides the full half split (recorded at its own
 # per-group size), draw these FIXED per-group replicate counts so we can see how
@@ -281,6 +299,79 @@ ref_limma <- function(counts, group) {
   fit <- eBayes(voomLmFit(dge, design), robust = TRUE)
   topTable(fit, coef = 2, number = Inf, sort.by = "none")$P.Value
 }
+
+# ==================== count-distribution diagnostic (Poisson vs NB) ====================
+#
+# Is the raw TCGA count data Poisson (Var = mean, "equidispersed") or Negative Binomial
+# (Var = mean + phi*mean^2, i.e. OVERDISPERSED)? That is exactly the assumption that
+# separates a Poisson model from the NB the reference tools (edgeR/DESeq2) rest on.
+#
+# For each adequately-expressed gene we fit an intercept-only Poisson and NB GLM, EACH
+# with a log(library-size) offset so that sequencing-depth differences between samples
+# do NOT masquerade as overdispersion, then compare them three ways:
+#   * LRT  = 2*(logLik_NB - logLik_Poisson). Poisson is NB with phi = 0, which lies on
+#     the boundary of the parameter space, so under H0 (Poisson) the statistic follows a
+#     50:50 mixture of chi^2_0 and chi^2_1 -> p = 0.5 * P(chi^2_1 > LRT). A small p means
+#     the gene is significantly overdispersed (favours NB).
+#   * AIC  : NB is preferred when AIC_NB < AIC_Poisson (this penalises NB's extra param).
+#   * phi  = 1/theta: the fitted NB dispersion itself (0 = Poisson); BCV = sqrt(phi) is
+#     the biological coefficient of variation, the standard RNA-seq overdispersion scale.
+# edgeR's common dispersion for the whole cohort is reported as an independent cross-check.
+# Returns one summary row per cohort. This is a property of the DATA, so it is computed
+# ONCE per cohort (not per null split).
+test_count_distribution <- function(counts, cancer, stage,
+                                    min_mean = DIST_MIN_MEAN, max_genes = DIST_MAX_GENES,
+                                    n_cores = N_CORES) {
+  if (is.null(counts) || ncol(counts) < 3L) return(NULL)
+  libsize <- colSums(counts)
+  if (any(libsize <= 0)) return(NULL)
+  logls <- log(libsize)
+
+  testable <- which(rowMeans(counts) >= min_mean)
+  if (length(testable) < 10L) return(NULL)
+  # Deterministic, evenly-spaced thinning (no RNG) to cap the per-gene glm.nb cost.
+  if (length(testable) > max_genes)
+    testable <- testable[round(seq(1, length(testable), length.out = max_genes))]
+
+  per_gene <- function(g) {
+    y <- as.numeric(counts[g, ])
+    if (stats::var(y) == 0) return(NULL)
+    fitP  <- tryCatch(glm(y ~ offset(logls), family = poisson()), error = function(e) NULL)
+    if (is.null(fitP)) return(NULL)
+    fitNB <- tryCatch(suppressWarnings(MASS::glm.nb(y ~ offset(logls))), error = function(e) NULL)
+    if (is.null(fitNB)) return(NULL)
+    llP <- as.numeric(logLik(fitP)); llNB <- as.numeric(logLik(fitNB))
+    lrt <- 2 * (llNB - llP)
+    p   <- if (lrt <= 0) 1 else 0.5 * pchisq(lrt, df = 1, lower.tail = FALSE)
+    c(p = p, nb_aic = as.numeric(AIC(fitNB) < AIC(fitP)), phi = 1 / fitNB$theta)
+  }
+  fits <- parallel::mclapply(testable, per_gene, mc.cores = n_cores, mc.preschedule = TRUE)
+  fits <- do.call(rbind, Filter(function(x) is.numeric(x) && length(x) == 3L, fits))
+  if (is.null(fits) || nrow(fits) < 10L) return(NULL)
+
+  # edgeR common dispersion cross-check (one robust cohort-level phi via the NB GLM /
+  # qCML framework, library-size-normalised by TMM). NA if it fails.
+  edger_phi <- tryCatch(suppressWarnings(suppressMessages({
+    y <- DGEList(counts = counts)
+    y <- y[filterByExpr(y), , keep.lib.sizes = FALSE]
+    y <- normLibSizes(y)
+    estimateDisp(y)$common.dispersion
+  })), error = function(e) NA_real_)
+
+  frac_fdr <- mean(p.adjust(fits[, "p"], method = "BH") < 0.05)
+  data.frame(
+    cancer = cancer, stage = stage, n_samples = ncol(counts),
+    n_genes_tested   = nrow(fits),
+    frac_reject_pois = round(mean(fits[, "p"] < 0.05), 4),  # raw p<0.05: ~1 => NB, ~0 => Poisson
+    frac_reject_fdr  = round(frac_fdr, 4),                  # BH-FDR<0.05 (stricter)
+    frac_nb_by_aic   = round(mean(fits[, "nb_aic"]), 4),    # NB preferred by AIC
+    median_phi       = round(median(fits[, "phi"]), 4),     # NB dispersion (0 = Poisson)
+    median_bcv       = round(median(sqrt(pmax(fits[, "phi"], 0))), 4),
+    edger_common_phi = round(edger_phi, 4),                 # edgeR cohort dispersion (cross-check)
+    verdict = ifelse(frac_fdr >= 0.5, "Negative Binomial (overdispersed)", "Poisson-like"),
+    stringsAsFactors = FALSE)
+}
+
 # ==================== sweep ====================
 
 # Pure builders (return data.frames) so results can be collected OUT of parallel
@@ -305,14 +396,18 @@ make_pval <- function(method, cancer, stage, n_per_group, pv) {
 # arm (full half + every feasible fixed size) it draws an independent A/B split
 # and runs every method at that per-group replicate count, tagging each row with
 # n_per_group. Pure (no globals) so it is safe inside an mclapply worker.
-run_one_split <- function(s, m_tpm, m_cnt, cname, stage, n_tox, n_cnt) {
+run_one_split <- function(s, m_tpm, m_cnt, cname, stage, n_tox, n_cnt, m_tpm_shared = NULL) {
   rws <- list(); pvs <- list()
   arms <- c(0L, SUBSAMPLE_SIZES)      # 0L = full half split; rest = fixed per-group sizes
   for (size in arms) {
     if (!is.null(m_tpm)) {
-      sp <- pick_split(n_tox, size)
+      sp <- pick_split(n_tox, size)   # split is over SAMPLES; the same sp serves every TOX arm
       if (!is.null(sp)) for (arm in TOX_ARMS) {
-        pv <- tryCatch(run_tox_once(m_tpm, arm$norm, sp, arm$trim), error = function(e) numeric(0))
+        # `shared` arms run on the edgeR/limma gene set (`m_tpm_shared`: same samples/rows as
+        # m_tpm, columns = the edgeR keep genes). Skip them when there is no shared set.
+        if (isTRUE(arm$shared) && (is.null(m_tpm_shared) || !ncol(m_tpm_shared))) next
+        mt_arm <- if (isTRUE(arm$shared)) m_tpm_shared else m_tpm
+        pv <- tryCatch(run_tox_once(mt_arm, arm$norm, sp, arm$trim), error = function(e) numeric(0))
         if (length(pv)) {
           rws <- c(rws, list(make_row(arm$label, cname, stage, s, n_tox, sp$g, pval_metrics(pv))))
           pvs <- c(pvs, list(make_pval(arm$label, cname, stage, sp$g, pv)))
@@ -339,7 +434,7 @@ run_one_split <- function(s, m_tpm, m_cnt, cname, stage, n_tox, n_cnt) {
 RNGkind("L'Ecuyer-CMRG")   # parallel-safe RNG streams so the mclapply runs are reproducible
 set.seed(42)
 
-rows <- list(); pval_pool <- list()
+rows <- list(); pval_pool <- list(); dist_rows <- list()
 
 for (cname in names(CALIB_CANCERS)) {
   pid <- unname(CALIB_CANCERS[cname]); cat(sprintf("\n>>> %s (%s)\n", cname, pid))
@@ -347,8 +442,9 @@ for (cname in names(CALIB_CANCERS)) {
   kept_ids  <- if (!is.null(keep_mask)) names(keep_mask)[keep_mask] else NULL
 
   for (stage in CALIB_STAGES) {
-    # ---- TOX input: raw TPM (samples x genes), TOX gene filter ----
-    m_tpm <- NULL
+    # ---- TOX input: raw TPM (samples x genes). m_tpm_full keeps ALL genes; m_tpm is
+    #      restricted to TOX's own compute_gene_keep_mask filter. ----
+    m_tpm <- NULL; m_tpm_full <- NULL
     if (RUN_TOX && !is.null(kept_ids)) {
       d <- tryCatch(load_stage_data(pid, stage, "cancer", use_constant_healthy = FALSE,
                                     norm_method = "raw", apply_mean = FALSE, normalize = FALSE),
@@ -356,6 +452,7 @@ for (cname in names(CALIB_CANCERS)) {
       if (!is.null(d) && is.matrix(d$expression_vectors)) {
         m <- d$expression_vectors
         if (is.null(colnames(m)) && !is.null(d$gene_ids)) colnames(m) <- d$gene_ids
+        m_tpm_full <- m
         m_tpm <- m[, intersect(kept_ids, colnames(m)), drop = FALSE]
       }
     }
@@ -366,12 +463,35 @@ for (cname in names(CALIB_CANCERS)) {
     n_cnt <- if (!is.null(m_cnt)) ncol(m_cnt) else 0L
     if (max(n_tox, n_cnt) < MIN_SAMPLES) { cat(sprintf("    %-10s too few samples; skip\n", stage)); next }
 
+    # ---- shared gene set: the edgeR/limma keep mask (cohort-level filterByExpr on the
+    #      raw counts) intersected with the TPM genes. TOX's `*-degfilt` arms run on this,
+    #      so TOX and the DE tools operate on the EXACT same genes. Same samples/rows as
+    #      m_tpm, so a sample split applies to it unchanged. ----
+    m_tpm_shared <- NULL
+    if (!is.null(m_tpm_full) && !is.null(m_cnt)) {
+      deg_keep <- tryCatch(suppressWarnings(rownames(m_cnt)[filterByExpr(DGEList(counts = m_cnt))]),
+                           error = function(e) NULL)
+      shared_ids <- if (!is.null(deg_keep)) intersect(colnames(m_tpm_full), deg_keep) else character(0)
+      if (length(shared_ids) >= 10L) m_tpm_shared <- m_tpm_full[, shared_ids, drop = FALSE]
+    }
+
+    # ---- Count-distribution diagnostic (Poisson vs NB), once per cohort on raw counts ----
+    if (RUN_DIST_TEST && !is.null(m_cnt) && n_cnt >= 3L) {
+      dt <- tryCatch(test_count_distribution(m_cnt, cname, stage), error = function(e) NULL)
+      if (!is.null(dt)) {
+        dist_rows <- c(dist_rows, list(dt))
+        cat(sprintf("    %-10s  dist: %-33s reject-Poisson(FDR<.05)=%.0f%% of %d genes | median phi=%.3f | edgeR phi=%.3f\n",
+                    stage, dt$verdict, 100 * dt$frac_reject_fdr, dt$n_genes_tested,
+                    dt$median_phi, dt$edger_common_phi))
+      }
+    }
+
     # ---- N_SPLITS runs IN PARALLEL over N_CORES. mc.silent = TRUE swallows ALL
     #      child stdout, which also silences the noisy per-call debug prints that
     #      used to flood the log. ----
     res_list <- mclapply(seq_len(N_SPLITS), run_one_split,
                          m_tpm = m_tpm, m_cnt = m_cnt, cname = cname, stage = stage,
-                         n_tox = n_tox, n_cnt = n_cnt,
+                         n_tox = n_tox, n_cnt = n_cnt, m_tpm_shared = m_tpm_shared,
                          mc.cores = N_CORES, mc.preschedule = TRUE, mc.silent = TRUE)
     ok <- vapply(res_list, is.list, logical(1))        # drop any worker that errored out
     for (r in res_list[ok]) { rows <- c(rows, r$rows); pval_pool <- c(pval_pool, r$pvals) }
@@ -434,6 +554,25 @@ ov <- summ %>% group_by(method, n_per_group) %>%
             worst_FPR_0.05 = round(max(FPR_0.05, na.rm = TRUE), 4),
             worst_hits_FDR05 = round(max(hits_FDR05), 4), .groups = "drop") %>% as.data.frame()
 print(ov[order(ov$method, ov$n_per_group), ], row.names = FALSE)
+
+# ==================== count-distribution summary (Poisson vs NB) ====================
+if (RUN_DIST_TEST && length(dist_rows)) {
+  dist_summary <- as.data.frame(rbindlist(dist_rows))
+  write.csv(dist_summary, file.path(OUT_DIR, "count_distribution_poisson_vs_nb.csv"), row.names = FALSE)
+  cat("\n", paste(rep("=", 116), collapse = ""), "\n", sep = "")
+  cat("COUNT DISTRIBUTION -- is the raw TCGA count data Poisson or Negative Binomial?\n")
+  cat("Per gene: intercept-only Poisson vs NB GLM with a log(library-size) offset; compared by LRT, AIC and dispersion.\n")
+  cat("frac_reject_pois / _fdr = fraction of genes significantly OVERDISPERSED (=> NB) at raw p<0.05 / BH-FDR<0.05.\n")
+  cat("frac_nb_by_aic = fraction where NB beats Poisson by AIC.  median_phi = NB dispersion (0 = Poisson; Var = mu + phi*mu^2).\n")
+  cat("median_bcv = sqrt(phi) = biological coeff. of variation.  edger_common_phi = edgeR cohort dispersion (independent check).\n")
+  cat("RNA-seq expectation: strong overdispersion => Negative Binomial (this is why edgeR/DESeq2 use NB, not Poisson).\n")
+  cat(paste(rep("=", 116), collapse = ""), "\n", sep = "")
+  print(dist_summary[order(dist_summary$cancer, dist_summary$stage), ], row.names = FALSE)
+  cat("\n--- overall: cohorts called NB vs Poisson ---\n")
+  cat(sprintf("  NB (overdispersed): %d / %d cohorts   |   median BCV across cohorts: %.3f\n",
+              sum(grepl("^Negative", dist_summary$verdict)), nrow(dist_summary),
+              median(dist_summary$median_bcv, na.rm = TRUE)))
+}
 
 # ==================== plots ====================
 pval_pool <- Filter(Negate(is.null), pval_pool)          # make_pval returns NULL for empty runs
