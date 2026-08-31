@@ -6,9 +6,11 @@
 # fake groups ("A" vs "B"). There is no true differential expression between two
 # random halves of the same population, so this is the null hypothesis H0.
 #
-# We run TOX (raw, raw+tail-trim, log), edgeR and limma-voom on the SAME H0
-# splits. The raw+trim arm probes whether trimming the residual pool's tails
-# improves raw-norm calibration (a raw-only knob; see TOX_ARMS).
+# We run the core TOX arms (raw, log), edgeR and limma-voom on the SAME H0 splits,
+# and sweep TOX's kNN neighbourhood size (K_GRID) to see how it affects calibration
+# (expected: little for raw, more for log). Optional TOX variants -- raw tail-trim and
+# edgeR-gene-set (degfilt) arms -- are commented out in TOX_ARMS for a cheaper sweep;
+# re-enable them at the single best kNN config once this identifies one.
 #
 # We ALSO vary the number of replicates per fake group: besides the full half
 # split, we draw fixed-size subsamples (e.g. 10 / 20 / 40 per group) so the
@@ -139,26 +141,30 @@ dir.create(PLOT_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # ==================== CONFIG ====================
 
-# A mixture cancer (KIRC), a high-signal one (LUAD), a heavy-tailed-control one (STAD).
-CALIB_CANCERS <- CANCER_TYPES[c("kidney cancer",
-                                "non small cell lung cancer",
-                                "stomach cancer")]
-CALIB_STAGES  <- STAGES                 # restrict for speed, e.g. c("Stage I")
+# All 8 TCGA cancers (was a 3-cancer subset: KIRC/LUAD/STAD). Subset for a quick run.
+CALIB_CANCERS <- CANCER_TYPES
+CALIB_STAGES  <- STAGES                 # the 4 cancer stages; restrict for speed, e.g. c("Stage I")
+RUN_HEALTHY   <- TRUE                   # ALSO run the matched-normal (healthy) cohort per cancer
+                                        # (loaded via healthy_<pid>_counts.rds / the "healthy" TPM ref)
 
-# TOX arms: each is a (norm, trim, shared, label). Residual-pool trimming is a RAW-only
-# knob (the Fortran ignores trim_frac under log norm), so we A/B it on the raw arm and
-# leave log untrimmed. `shared = TRUE` runs TOX on the SAME gene set edgeR/limma use
-# (the cohort-level filterByExpr keep mask, intersected with the TPM genes) instead of
-# TOX's own compute_gene_keep_mask filter — an apples-to-apples run where every method
-# sees the exact same genes. Drop arms to skip comparisons.
+# TOX arms: each is a (norm, trim, shared, label).
+# For the kNN sweep we run only the CORE log + raw arms (no trim, no degfilt): the k
+# effect is a norm question, so if k doesn't move log/raw calibration here it won't move
+# the trim/degfilt variants either -- and if it DOES, we re-enable those variants at the
+# single best kNN config identified here (much cheaper than sweeping all arms x all k).
+# The commented arms below (results already collected) can be switched back on then.
+#   trim = raw-only pool tail-trim (Fortran ignores it under log);
+#   shared = TRUE runs on the edgeR/limma filterByExpr gene set (apples-to-apples).
 TOX_ARMS <- list(
   list(norm = "log", trim = 0.0,  shared = FALSE, label = "TOX-log"),
-  list(norm = "raw", trim = 0.0,  shared = FALSE, label = "TOX-raw"),
-  list(norm = "raw", trim = 0.01, shared = FALSE, label = "TOX-raw-trim01"),
-  list(norm = "raw", trim = 0.02, shared = FALSE, label = "TOX-raw-trim02"),
-  list(norm = "log", trim = 0.0,  shared = TRUE,  label = "TOX-log-degfilt"),
-  list(norm = "raw", trim = 0.0,  shared = TRUE,  label = "TOX-raw-degfilt")
+  list(norm = "raw", trim = 0.0,  shared = FALSE, label = "TOX-raw")
+  # , list(norm = "raw", trim = 0.01, shared = FALSE, label = "TOX-raw-trim01")
+  # , list(norm = "raw", trim = 0.02, shared = FALSE, label = "TOX-raw-trim02")
+  # , list(norm = "log", trim = 0.0,  shared = TRUE,  label = "TOX-log-degfilt")
+  # , list(norm = "raw", trim = 0.0,  shared = TRUE,  label = "TOX-raw-degfilt")
 )
+# Only build the (costly) shared edgeR/limma gene set per cohort if a *-degfilt arm needs it.
+ANY_SHARED_ARM <- any(vapply(TOX_ARMS, function(a) isTRUE(a$shared), logical(1)))
 
 # Which methods to run.
 RUN_TOX    <- TRUE
@@ -190,8 +196,17 @@ DIST_MAX_GENES   <- 1500L                 # cap tested genes per cohort (glm.nb 
 SUBSAMPLE_SIZES  <- c(10L, 20L, 40L)     # per-group replicate counts to probe
 MIN_PER_GROUP    <- 3L                   # smallest usable group (full arm floor)
 
-# TOX neighbourhood params -- MATCH the production run.
-K_START <- 8L; K_STEP <- 1L; K_MAX <- 15L; TAU <- 0.1; MAX_POOL <- 50000L
+# TOX kNN neighbourhood SWEEP. Note: previous *calibration* tests only ever used
+# k_start >= 20 with k_max 50-70 (k20_50 / k30_70 / k40_70, the best being ~k20_50);
+# production uses {8,1,15} but that was never calibration-tested. Here we sweep slightly
+# SMALLER neighbourhoods -- k_start in {15,20}, k_max in {30,40,50}, k_step 1 -- because on
+# SIMULATED data the kNN size barely moved raw calibration but measurably changed log (our
+# main focus), so we probe its effect on the real TCGA null. Every TOX arm runs at every
+# K_GRID config; the config name is recorded per row as `k_config`.
+K_GRID <- do.call(c, lapply(c(8L, 15L, 20L), function(ks)
+  lapply(c(30L, 40L, 50L), function(km)
+    list(k_start = ks, k_step = 1L, k_max = km, name = sprintf("k%d_%d", ks, km)))))
+TAU <- 0.1; MAX_POOL <- 70000L
 TOX_MODEL_FN <- tox_compute_noise_pvalues_pipeline_exact
 
 set.seed(42)
@@ -200,16 +215,21 @@ if (RUN_EDGER || RUN_LIMMA) suppressMessages({library(edgeR); library(limma)})
 
 # ==================== data loaders ====================
 
-#' Load raw COUNTS (genes x samples) for a cancer stage, mirroring deg_comparison.R.
+#' Load raw COUNTS (genes x samples) for a cancer stage OR the matched-normal cohort,
+#' mirroring deg_comparison.R. `stage == "healthy"` reads healthy_<pid>_counts.rds (the
+#' matched normals, one group per cancer); any other value reads <pid>-<stage>_counts.rds.
 load_counts_matrix <- function(project_id, stage) {
-  fn <- file.path(BASE_DATA_DIR, project_id,
-                  paste0(project_id, "-", gsub(" ", "-", stage), "_counts.rds"))
+  fn <- if (identical(stage, "healthy"))
+          file.path(BASE_DATA_DIR, project_id, paste0("healthy_", project_id, "_counts.rds"))
+        else
+          file.path(BASE_DATA_DIR, project_id,
+                    paste0(project_id, "-", gsub(" ", "-", stage), "_counts.rds"))
   if (!file.exists(fn)) return(NULL)
   obj <- readRDS(fn)
   if (!is.matrix(obj$expression_vectors)) return(NULL)
   m <- t(obj$expression_vectors)               # samples x genes -> genes x samples
   colnames(m) <- rownames(obj$expression_vectors)
-  rownames(m) <- obj$gene_ids
+  rownames(m) <- if (!is.null(obj$gene_ids)) obj$gene_ids else colnames(obj$expression_vectors)
   m
 }
 
@@ -249,7 +269,7 @@ pick_split <- function(n, size) {
 
 # ==================== TOX ====================
 
-run_tox_once <- function(raw_mat, norm_method, sp, trim_frac = 0.0) {
+run_tox_once <- function(raw_mat, norm_method, sp, trim_frac = 0.0, kcfg = K_GRID[[1]]) {
   ng <- ncol(raw_mat)
   pa <- preprocess_replicates(raw_mat[sp$a, , drop = FALSE], norm_method)
   pb <- preprocess_replicates(raw_mat[sp$b, , drop = FALSE], norm_method)
@@ -266,7 +286,7 @@ run_tox_once <- function(raw_mat, norm_method, sp, trim_frac = 0.0) {
     case_means = as.numeric(pa$means), case_replicates = pa$prelog,
     control_means = as.numeric(pb$means), control_replicates = pb$prelog,
     obs_own = obs_own, valid_genes_own = valid,
-    norm_method = norm_int, k_start = K_START, k_step = K_STEP, k_max = K_MAX,
+    norm_method = norm_int, k_start = kcfg$k_start, k_step = kcfg$k_step, k_max = kcfg$k_max,
     tau = TAU, trim_frac = trim_frac, max_pool_size = MAX_POOL)
   p <- res$pvalues_own; p[p < 0 | p > 1] <- NA; p[!is.na(p)]
 }
@@ -376,20 +396,20 @@ test_count_distribution <- function(counts, cancer, stage,
 
 # Pure builders (return data.frames) so results can be collected OUT of parallel
 # workers -- mclapply children cannot write to a parent-global accumulator.
-make_row <- function(method, cancer, stage, run, n_samples, n_per_group, mt) {
+make_row <- function(method, cancer, stage, run, n_samples, n_per_group, k_config, mt) {
   data.frame(method = method, cancer = cancer, stage = stage, run = run,
-             n_samples = n_samples, n_per_group = n_per_group, n_genes = mt$n,
+             n_samples = n_samples, n_per_group = n_per_group, k_config = k_config, n_genes = mt$n,
              fpr_0.05 = mt$fpr_0.05, fpr_0.01 = mt$fpr_0.01,
              median_p = mt$median_p, hits_fdr05 = mt$hits_fdr05,
              ks_D = mt$ks_D, ad_A2 = mt$ad_A2, cvm_W2 = mt$cvm_W2,
              stringsAsFactors = FALSE)
 }
 # A capped random sample of raw p-values, kept for the histograms and QQ-plots.
-make_pval <- function(method, cancer, stage, n_per_group, pv) {
+make_pval <- function(method, cancer, stage, n_per_group, k_config, pv) {
   pv <- pv[is.finite(pv)]
   if (!length(pv)) return(NULL)
   data.frame(method = method, cancer = cancer, stage = stage, n_per_group = n_per_group,
-             p = sample(pv, min(500L, length(pv))), stringsAsFactors = FALSE)
+             k_config = k_config, p = sample(pv, min(500L, length(pv))), stringsAsFactors = FALSE)
 }
 
 # One run = one set of random partitions, one per replicate-count arm. For each
@@ -402,15 +422,18 @@ run_one_split <- function(s, m_tpm, m_cnt, cname, stage, n_tox, n_cnt, m_tpm_sha
   for (size in arms) {
     if (!is.null(m_tpm)) {
       sp <- pick_split(n_tox, size)   # split is over SAMPLES; the same sp serves every TOX arm
+      # Each TOX arm runs at EVERY kNN config (K_GRID); the config name is tagged as k_config.
       if (!is.null(sp)) for (arm in TOX_ARMS) {
         # `shared` arms run on the edgeR/limma gene set (`m_tpm_shared`: same samples/rows as
         # m_tpm, columns = the edgeR keep genes). Skip them when there is no shared set.
         if (isTRUE(arm$shared) && (is.null(m_tpm_shared) || !ncol(m_tpm_shared))) next
         mt_arm <- if (isTRUE(arm$shared)) m_tpm_shared else m_tpm
-        pv <- tryCatch(run_tox_once(mt_arm, arm$norm, sp, arm$trim), error = function(e) numeric(0))
-        if (length(pv)) {
-          rws <- c(rws, list(make_row(arm$label, cname, stage, s, n_tox, sp$g, pval_metrics(pv))))
-          pvs <- c(pvs, list(make_pval(arm$label, cname, stage, sp$g, pv)))
+        for (kcfg in K_GRID) {
+          pv <- tryCatch(run_tox_once(mt_arm, arm$norm, sp, arm$trim, kcfg), error = function(e) numeric(0))
+          if (length(pv)) {
+            rws <- c(rws, list(make_row(arm$label, cname, stage, s, n_tox, sp$g, kcfg$name, pval_metrics(pv))))
+            pvs <- c(pvs, list(make_pval(arm$label, cname, stage, sp$g, kcfg$name, pv)))
+          }
         }
       }
     }
@@ -419,12 +442,13 @@ run_one_split <- function(s, m_tpm, m_cnt, cname, stage, n_tox, n_cnt, m_tpm_sha
       if (!is.null(sp)) {
         grp <- factor(c(rep("A", length(sp$a)), rep("B", length(sp$b))))
         cnt <- m_cnt[, c(sp$a, sp$b), drop = FALSE]
+        # edgeR/limma are kNN-independent -> k_config = NA.
         if (RUN_EDGER) { pv <- tryCatch(ref_edgeR(cnt, grp), error = function(e) numeric(0))
-          if (length(pv)) { rws <- c(rws, list(make_row("edgeR", cname, stage, s, n_cnt, sp$g, pval_metrics(pv))))
-                            pvs <- c(pvs, list(make_pval("edgeR", cname, stage, sp$g, pv))) } }
+          if (length(pv)) { rws <- c(rws, list(make_row("edgeR", cname, stage, s, n_cnt, sp$g, NA_character_, pval_metrics(pv))))
+                            pvs <- c(pvs, list(make_pval("edgeR", cname, stage, sp$g, NA_character_, pv))) } }
         if (RUN_LIMMA) { pv <- tryCatch(ref_limma(cnt, grp), error = function(e) numeric(0))
-          if (length(pv)) { rws <- c(rws, list(make_row("limma", cname, stage, s, n_cnt, sp$g, pval_metrics(pv))))
-                            pvs <- c(pvs, list(make_pval("limma", cname, stage, sp$g, pv))) } }
+          if (length(pv)) { rws <- c(rws, list(make_row("limma", cname, stage, s, n_cnt, sp$g, NA_character_, pval_metrics(pv))))
+                            pvs <- c(pvs, list(make_pval("limma", cname, stage, sp$g, NA_character_, pv))) } }
       }
     }
   }
@@ -441,14 +465,21 @@ for (cname in names(CALIB_CANCERS)) {
   keep_mask <- tryCatch(compute_gene_keep_mask(pid), error = function(e) NULL)
   kept_ids  <- if (!is.null(keep_mask)) names(keep_mask)[keep_mask] else NULL
 
-  for (stage in CALIB_STAGES) {
+  # Cohorts: the 4 cancer stages plus (optionally) the matched-normal "healthy" group.
+  for (stage in c(CALIB_STAGES, if (RUN_HEALTHY) "healthy")) {
     # ---- TOX input: raw TPM (samples x genes). m_tpm_full keeps ALL genes; m_tpm is
-    #      restricted to TOX's own compute_gene_keep_mask filter. ----
+    #      restricted to TOX's own compute_gene_keep_mask filter. "healthy" loads the
+    #      constant matched-normal reference; a stage loads that stage's cancer TPM. ----
     m_tpm <- NULL; m_tpm_full <- NULL
     if (RUN_TOX && !is.null(kept_ids)) {
-      d <- tryCatch(load_stage_data(pid, stage, "cancer", use_constant_healthy = FALSE,
-                                    norm_method = "raw", apply_mean = FALSE, normalize = FALSE),
-                    error = function(e) NULL)
+      d <- tryCatch(
+        if (identical(stage, "healthy"))
+          load_stage_data(pid, STAGES[1], "healthy", use_constant_healthy = TRUE,
+                          norm_method = "raw", apply_mean = FALSE, normalize = FALSE)
+        else
+          load_stage_data(pid, stage, "cancer", use_constant_healthy = FALSE,
+                          norm_method = "raw", apply_mean = FALSE, normalize = FALSE),
+        error = function(e) NULL)
       if (!is.null(d) && is.matrix(d$expression_vectors)) {
         m <- d$expression_vectors
         if (is.null(colnames(m)) && !is.null(d$gene_ids)) colnames(m) <- d$gene_ids
@@ -468,7 +499,7 @@ for (cname in names(CALIB_CANCERS)) {
     #      so TOX and the DE tools operate on the EXACT same genes. Same samples/rows as
     #      m_tpm, so a sample split applies to it unchanged. ----
     m_tpm_shared <- NULL
-    if (!is.null(m_tpm_full) && !is.null(m_cnt)) {
+    if (ANY_SHARED_ARM && !is.null(m_tpm_full) && !is.null(m_cnt)) {   # skip the cost if no *-degfilt arm is active
       deg_keep <- tryCatch(suppressWarnings(rownames(m_cnt)[filterByExpr(DGEList(counts = m_cnt))]),
                            error = function(e) NULL)
       shared_ids <- if (!is.null(deg_keep)) intersect(colnames(m_tpm_full), deg_keep) else character(0)
@@ -508,10 +539,11 @@ write.csv(detail, file.path(OUT_DIR, "null_calibration_per_run.csv"), row.names 
 
 # ==================== summary + verdict ====================
 
-# Aggregate per (method, cancer, stage, n_per_group): each replicate-count arm is
-# its own row so the influence of n on calibration is directly readable.
+# Aggregate per (method, cancer, stage, n_per_group, k_config): each replicate-count
+# arm and each kNN config is its own row so the influence of n AND of the neighbourhood
+# size on calibration is directly readable. (edgeR/limma have k_config = NA.)
 summ <- detail %>%
-  group_by(method, cancer, stage, n_per_group) %>%
+  group_by(method, cancer, stage, n_per_group, k_config) %>%
   summarise(n_samples = first(n_samples), runs = dplyr::n(),
             n_genes = round(mean(n_genes)),
             FPR_0.05    = round(mean(fpr_0.05), 4),
@@ -544,16 +576,29 @@ cat("Under H0: FPR@alpha ~= alpha  AND  hits_FDR05 ~= 0.  inflation = FPR@.05/0.
 cat("ks_D / ad_A2 / cvm_W2 = distance of the p-values to Uniform(0,1) (KS / Anderson-Darling /\n")
 cat("  Cramer-von Mises), averaged over runs; 0 = perfectly uniform. See QQ-plots in plots/.\n")
 cat("n_per_group = replicates per fake group for that arm (full half + fixed subsamples).\n")
+cat("k_config = TOX kNN neighbourhood config (k_start _ k_max, step 1); NA for edgeR/limma.\n")
+cat("Cohorts include the 4 cancer stages AND healthy (matched normals), across all 8 cancers.\n")
 cat(paste(rep("=", 116), collapse = ""), "\n", sep = "")
-print(summ[order(summ$cancer, summ$stage, summ$n_per_group, summ$method), ], row.names = FALSE)
+print(summ[order(summ$cancer, summ$stage, summ$n_per_group, summ$k_config, summ$method), ], row.names = FALSE)
 
-cat("\n--- per-method x replicate-count overall (median across cancers/stages) ---\n")
-ov <- summ %>% group_by(method, n_per_group) %>%
+# The key new readout: how the kNN neighbourhood size affects TOX calibration, per arm
+# (medians across cancers/stages/replicate-counts). Expect little effect for raw, more for log.
+cat("\n--- kNN SWEEP: per (method x k_config) medians across cancers/stages/replicate-counts (TOX only) ---\n")
+ksw <- summ %>% filter(!is.na(k_config)) %>% group_by(method, k_config) %>%
+  summarise(FPR_0.05 = round(median(FPR_0.05, na.rm = TRUE), 4),
+            ks_D  = round(median(ks_D,  na.rm = TRUE), 4),
+            ad_A2 = round(median(ad_A2, na.rm = TRUE), 4),
+            hits_FDR05     = round(median(hits_FDR05), 4),
+            worst_FPR_0.05 = round(max(FPR_0.05, na.rm = TRUE), 4), .groups = "drop") %>% as.data.frame()
+print(ksw[order(ksw$method, ksw$k_config), ], row.names = FALSE)
+
+cat("\n--- per-method overall (median across ALL cells: cancers/stages/replicate-counts/k) ---\n")
+ov <- summ %>% group_by(method) %>%
   summarise(FPR_0.05 = round(median(FPR_0.05, na.rm = TRUE), 4),
             hits_FDR05 = round(median(hits_FDR05), 4),
             worst_FPR_0.05 = round(max(FPR_0.05, na.rm = TRUE), 4),
             worst_hits_FDR05 = round(max(hits_FDR05), 4), .groups = "drop") %>% as.data.frame()
-print(ov[order(ov$method, ov$n_per_group), ], row.names = FALSE)
+print(ov[order(ov$method), ], row.names = FALSE)
 
 # ==================== count-distribution summary (Poisson vs NB) ====================
 if (RUN_DIST_TEST && length(dist_rows)) {
@@ -578,20 +623,42 @@ if (RUN_DIST_TEST && length(dist_rows)) {
 pval_pool <- Filter(Negate(is.null), pval_pool)          # make_pval returns NULL for empty runs
 pv_all <- if (length(pval_pool)) as.data.frame(rbindlist(pval_pool)) else NULL
 
+# The per-cohort money/hist/QQ plots can't also facet the kNN grid without exploding, so
+# they show a single REFERENCE k config (plus the k-independent refs, k_config = NA). The
+# full k grid lives in the CSV, the kNN-sweep table above, and the dedicated kNN plot below.
+REF_K   <- if ("k20_50" %in% summ$k_config) "k20_50" else stats::na.omit(unique(summ$k_config))[1]
+summ_ref <- summ[is.na(summ$k_config) | summ$k_config == REF_K, ]
+pv_ref   <- if (!is.null(pv_all)) pv_all[is.na(pv_all$k_config) | pv_all$k_config == REF_K, ] else NULL
+
+# KNN-SWEEP PLOT: how neighbourhood size moves TOX calibration, per arm (TOX only) -----
+ksw_long <- summ[!is.na(summ$k_config), ]
+if (nrow(ksw_long)) {
+  p_ksw <- ggplot(ksw_long, aes(k_config, ks_D, colour = factor(n_per_group), group = factor(n_per_group))) +
+    stat_summary(fun = median, geom = "line") + stat_summary(fun = median, geom = "point") +
+    facet_wrap(~ method) +
+    labs(title = "kNN sweep: p-value non-uniformity vs neighbourhood size (median over cancers/stages)",
+         subtitle = "y = KS distance to Uniform(0,1) (0 = perfect); expect ~flat for raw, more movement for log",
+         x = "kNN config (k_start _ k_max)", y = "ks_D (median)", colour = "reps/group") +
+    theme_minimal(base_size = 9) + theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                                         legend.position = "bottom")
+  tryCatch(ggsave(file.path(PLOT_DIR, "null_knn_sweep.png"), p_ksw, width = 13, height = 9, dpi = 140),
+           error = function(e) NULL)
+}
+
 # MONEY PLOT 1: false calls under H0 vs replicate count (must be ~0 for every method) -
-p_hits <- ggplot(summ, aes(factor(n_per_group), hits_FDR05, fill = method)) +
+p_hits <- ggplot(summ_ref, aes(factor(n_per_group), hits_FDR05, fill = method)) +
   geom_col(position = position_dodge(preserve = "single")) +
   geom_hline(yintercept = 0.05, linetype = 3, colour = "grey40") +
   facet_grid(cancer ~ stage) +
   labs(title = "False calls under H0 (fraction significant at each method's FDR<0.05)",
-       subtitle = "must be ~0. Bars near/above the dotted 0.05 line = the method invents DE from noise.",
+       subtitle = sprintf("must be ~0. TOX shown at k_config=%s (see CSV for the full kNN grid).", REF_K),
        x = "replicates per group", y = "hits @ FDR<0.05 (H0)", fill = NULL) +
   theme_minimal(base_size = 9) + theme(legend.position = "bottom")
 tryCatch(ggsave(file.path(PLOT_DIR, "null_false_calls.png"), p_hits, width = 12, height = 8, dpi = 140),
          error = function(e) NULL)
 
 # MONEY PLOT 2: raw-p FPR inflation vs replicate count (p-value methods) ------------
-sp2 <- summ[!is.na(summ$inflation_0.05), ]
+sp2 <- summ_ref[!is.na(summ_ref$inflation_0.05), ]
 p_inf <- ggplot(sp2, aes(factor(n_per_group), inflation_0.05, fill = method)) +
   geom_col(position = position_dodge(preserve = "single")) +
   geom_hline(yintercept = 1, linetype = 2) +
@@ -605,12 +672,12 @@ tryCatch(ggsave(file.path(PLOT_DIR, "null_fpr_inflation.png"), p_inf, width = 12
 
 # p-value histograms, faceted method x replicate count (pooled over cohorts, since
 # each panel must hold a single replicate count for the shape to be meaningful) ----
-if (!is.null(pv_all)) {
-  p_hist <- ggplot(pv_all, aes(p)) +
+if (!is.null(pv_ref)) {
+  p_hist <- ggplot(pv_ref, aes(p)) +
     geom_histogram(boundary = 0, bins = 20, fill = "steelblue", colour = "white") +
     facet_grid(method ~ n_per_group, scales = "free_y") +
     labs(title = "Null p-value distributions (should be UNIFORM under H0)",
-         subtitle = "columns = replicates per group; left spike = anti-conservative (over-calling)",
+         subtitle = sprintf("columns = replicates per group; TOX at k_config=%s; left spike = anti-conservative", REF_K),
          x = "raw p-value", y = "count") +
     theme_minimal(base_size = 8)
   tryCatch(ggsave(file.path(PLOT_DIR, "null_pvalue_histograms.png"), p_hist,
@@ -618,7 +685,7 @@ if (!is.null(pv_all)) {
 }
 
 # QQ-plots: observed p vs expected uniform quantile (should hug the diagonal) ------
-if (!is.null(pv_all)) {
+if (!is.null(pv_ref)) {
   qq_points <- function(p, npts = 2000L) {
     p <- sort(p[is.finite(p)]); n <- length(p)
     if (n < 2L) return(NULL)
@@ -626,7 +693,7 @@ if (!is.null(pv_all)) {
     data.frame(expected = (idx - 0.5) / n, observed = p[idx])
   }
   qq <- do.call(rbind, lapply(
-    split(pv_all, list(pv_all$method, pv_all$n_per_group), drop = TRUE),
+    split(pv_ref, list(pv_ref$method, pv_ref$n_per_group), drop = TRUE),
     function(df) { q <- qq_points(df$p)
                   if (is.null(q)) NULL else
                     cbind(method = df$method[1], n_per_group = df$n_per_group[1], q) }))
