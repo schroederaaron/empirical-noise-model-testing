@@ -99,12 +99,6 @@ load_or_install("dplyr")
 load_or_install("goftest")               # Anderson-Darling / Cramer-von Mises GoF tests
 load_or_install("parallel")              # mclapply -- fork-based parallel run sweep
 
-# MASS provides glm.nb (used by the Poisson-vs-NB count-distribution test). Ensure it
-# is installed but do NOT attach it -- MASS::select would mask dplyr::select, which the
-# summary block relies on. We call MASS::glm.nb fully qualified instead.
-if (!requireNamespace("MASS", quietly = TRUE))
-  install.packages("MASS", repos = "https://cloud.r-project.org", lib = LIB_DIR)
-
 # Each fork must run single-threaded: the TOX Fortran uses OpenMP `do concurrent`,
 # so N_CORES forks x N_CORES OpenMP threads would oversubscribe (e.g. 32x32 = 1024
 # threads) and run SLOWER than serial. The mclapply forks provide the parallelism.
@@ -181,12 +175,8 @@ N_CORES          <- 32L                  # cores for the parallel (mclapply) run
 MIN_SAMPLES      <- 16L                  # need enough samples for the full half split
 ALPHAS           <- c(0.05, 0.01)
 
-# Count-distribution diagnostic: is the raw TCGA count data Poisson or Negative
-# Binomial? Runs once per cohort on the raw counts (independent of the null splits).
-# See test_count_distribution().
-RUN_DIST_TEST    <- TRUE
-DIST_MIN_MEAN    <- 5                     # min mean raw count for a gene to be testable
-DIST_MAX_GENES   <- 1500L                 # cap tested genes per cohort (glm.nb is iterative)
+# NOTE: the Poisson-vs-NB count-distribution diagnostic now lives in its own script,
+# count_distribution.R (it's a property of the data, not the null-split experiment).
 
 # Replicate-count sweep. Besides the full half split (recorded at its own
 # per-group size), draw these FIXED per-group replicate counts so we can see how
@@ -320,78 +310,6 @@ ref_limma <- function(counts, group) {
   topTable(fit, coef = 2, number = Inf, sort.by = "none")$P.Value
 }
 
-# ==================== count-distribution diagnostic (Poisson vs NB) ====================
-#
-# Is the raw TCGA count data Poisson (Var = mean, "equidispersed") or Negative Binomial
-# (Var = mean + phi*mean^2, i.e. OVERDISPERSED)? That is exactly the assumption that
-# separates a Poisson model from the NB the reference tools (edgeR/DESeq2) rest on.
-#
-# For each adequately-expressed gene we fit an intercept-only Poisson and NB GLM, EACH
-# with a log(library-size) offset so that sequencing-depth differences between samples
-# do NOT masquerade as overdispersion, then compare them three ways:
-#   * LRT  = 2*(logLik_NB - logLik_Poisson). Poisson is NB with phi = 0, which lies on
-#     the boundary of the parameter space, so under H0 (Poisson) the statistic follows a
-#     50:50 mixture of chi^2_0 and chi^2_1 -> p = 0.5 * P(chi^2_1 > LRT). A small p means
-#     the gene is significantly overdispersed (favours NB).
-#   * AIC  : NB is preferred when AIC_NB < AIC_Poisson (this penalises NB's extra param).
-#   * phi  = 1/theta: the fitted NB dispersion itself (0 = Poisson); BCV = sqrt(phi) is
-#     the biological coefficient of variation, the standard RNA-seq overdispersion scale.
-# edgeR's common dispersion for the whole cohort is reported as an independent cross-check.
-# Returns one summary row per cohort. This is a property of the DATA, so it is computed
-# ONCE per cohort (not per null split).
-test_count_distribution <- function(counts, cancer, stage,
-                                    min_mean = DIST_MIN_MEAN, max_genes = DIST_MAX_GENES,
-                                    n_cores = N_CORES) {
-  if (is.null(counts) || ncol(counts) < 3L) return(NULL)
-  libsize <- colSums(counts)
-  if (any(libsize <= 0)) return(NULL)
-  logls <- log(libsize)
-
-  testable <- which(rowMeans(counts) >= min_mean)
-  if (length(testable) < 10L) return(NULL)
-  # Deterministic, evenly-spaced thinning (no RNG) to cap the per-gene glm.nb cost.
-  if (length(testable) > max_genes)
-    testable <- testable[round(seq(1, length(testable), length.out = max_genes))]
-
-  per_gene <- function(g) {
-    y <- as.numeric(counts[g, ])
-    if (stats::var(y) == 0) return(NULL)
-    fitP  <- tryCatch(glm(y ~ offset(logls), family = poisson()), error = function(e) NULL)
-    if (is.null(fitP)) return(NULL)
-    fitNB <- tryCatch(suppressWarnings(MASS::glm.nb(y ~ offset(logls))), error = function(e) NULL)
-    if (is.null(fitNB)) return(NULL)
-    llP <- as.numeric(logLik(fitP)); llNB <- as.numeric(logLik(fitNB))
-    lrt <- 2 * (llNB - llP)
-    p   <- if (lrt <= 0) 1 else 0.5 * pchisq(lrt, df = 1, lower.tail = FALSE)
-    c(p = p, nb_aic = as.numeric(AIC(fitNB) < AIC(fitP)), phi = 1 / fitNB$theta)
-  }
-  fits <- parallel::mclapply(testable, per_gene, mc.cores = n_cores, mc.preschedule = TRUE)
-  fits <- do.call(rbind, Filter(function(x) is.numeric(x) && length(x) == 3L, fits))
-  if (is.null(fits) || nrow(fits) < 10L) return(NULL)
-
-  # edgeR common dispersion cross-check (one robust cohort-level phi via the NB GLM /
-  # qCML framework, library-size-normalised by TMM). NA if it fails.
-  edger_phi <- tryCatch(suppressWarnings(suppressMessages({
-    y <- DGEList(counts = counts)
-    y <- y[filterByExpr(y), , keep.lib.sizes = FALSE]
-    y <- normLibSizes(y)
-    estimateDisp(y)$common.dispersion
-  })), error = function(e) NA_real_)
-
-  frac_fdr <- mean(p.adjust(fits[, "p"], method = "BH") < 0.05)
-  data.frame(
-    cancer = cancer, stage = stage, n_samples = ncol(counts),
-    n_genes_tested   = nrow(fits),
-    frac_reject_pois = round(mean(fits[, "p"] < 0.05), 4),  # raw p<0.05: ~1 => NB, ~0 => Poisson
-    frac_reject_fdr  = round(frac_fdr, 4),                  # BH-FDR<0.05 (stricter)
-    frac_nb_by_aic   = round(mean(fits[, "nb_aic"]), 4),    # NB preferred by AIC
-    median_phi       = round(median(fits[, "phi"]), 4),     # NB dispersion (0 = Poisson)
-    median_bcv       = round(median(sqrt(pmax(fits[, "phi"], 0))), 4),
-    edger_common_phi = round(edger_phi, 4),                 # edgeR cohort dispersion (cross-check)
-    verdict = ifelse(frac_fdr >= 0.5, "Negative Binomial (overdispersed)", "Poisson-like"),
-    stringsAsFactors = FALSE)
-}
-
 # ==================== sweep ====================
 
 # Pure builders (return data.frames) so results can be collected OUT of parallel
@@ -458,7 +376,7 @@ run_one_split <- function(s, m_tpm, m_cnt, cname, stage, n_tox, n_cnt, m_tpm_sha
 RNGkind("L'Ecuyer-CMRG")   # parallel-safe RNG streams so the mclapply runs are reproducible
 set.seed(42)
 
-rows <- list(); pval_pool <- list(); dist_rows <- list()
+rows <- list(); pval_pool <- list()
 
 for (cname in names(CALIB_CANCERS)) {
   pid <- unname(CALIB_CANCERS[cname]); cat(sprintf("\n>>> %s (%s)\n", cname, pid))
@@ -504,17 +422,6 @@ for (cname in names(CALIB_CANCERS)) {
                            error = function(e) NULL)
       shared_ids <- if (!is.null(deg_keep)) intersect(colnames(m_tpm_full), deg_keep) else character(0)
       if (length(shared_ids) >= 10L) m_tpm_shared <- m_tpm_full[, shared_ids, drop = FALSE]
-    }
-
-    # ---- Count-distribution diagnostic (Poisson vs NB), once per cohort on raw counts ----
-    if (RUN_DIST_TEST && !is.null(m_cnt) && n_cnt >= 3L) {
-      dt <- tryCatch(test_count_distribution(m_cnt, cname, stage), error = function(e) NULL)
-      if (!is.null(dt)) {
-        dist_rows <- c(dist_rows, list(dt))
-        cat(sprintf("    %-10s  dist: %-33s reject-Poisson(FDR<.05)=%.0f%% of %d genes | median phi=%.3f | edgeR phi=%.3f\n",
-                    stage, dt$verdict, 100 * dt$frac_reject_fdr, dt$n_genes_tested,
-                    dt$median_phi, dt$edger_common_phi))
-      }
     }
 
     # ---- N_SPLITS runs IN PARALLEL over N_CORES. mc.silent = TRUE swallows ALL
@@ -599,25 +506,6 @@ ov <- summ %>% group_by(method) %>%
             worst_FPR_0.05 = round(max(FPR_0.05, na.rm = TRUE), 4),
             worst_hits_FDR05 = round(max(hits_FDR05), 4), .groups = "drop") %>% as.data.frame()
 print(ov[order(ov$method), ], row.names = FALSE)
-
-# ==================== count-distribution summary (Poisson vs NB) ====================
-if (RUN_DIST_TEST && length(dist_rows)) {
-  dist_summary <- as.data.frame(rbindlist(dist_rows))
-  write.csv(dist_summary, file.path(OUT_DIR, "count_distribution_poisson_vs_nb.csv"), row.names = FALSE)
-  cat("\n", paste(rep("=", 116), collapse = ""), "\n", sep = "")
-  cat("COUNT DISTRIBUTION -- is the raw TCGA count data Poisson or Negative Binomial?\n")
-  cat("Per gene: intercept-only Poisson vs NB GLM with a log(library-size) offset; compared by LRT, AIC and dispersion.\n")
-  cat("frac_reject_pois / _fdr = fraction of genes significantly OVERDISPERSED (=> NB) at raw p<0.05 / BH-FDR<0.05.\n")
-  cat("frac_nb_by_aic = fraction where NB beats Poisson by AIC.  median_phi = NB dispersion (0 = Poisson; Var = mu + phi*mu^2).\n")
-  cat("median_bcv = sqrt(phi) = biological coeff. of variation.  edger_common_phi = edgeR cohort dispersion (independent check).\n")
-  cat("RNA-seq expectation: strong overdispersion => Negative Binomial (this is why edgeR/DESeq2 use NB, not Poisson).\n")
-  cat(paste(rep("=", 116), collapse = ""), "\n", sep = "")
-  print(dist_summary[order(dist_summary$cancer, dist_summary$stage), ], row.names = FALSE)
-  cat("\n--- overall: cohorts called NB vs Poisson ---\n")
-  cat(sprintf("  NB (overdispersed): %d / %d cohorts   |   median BCV across cohorts: %.3f\n",
-              sum(grepl("^Negative", dist_summary$verdict)), nrow(dist_summary),
-              median(dist_summary$median_bcv, na.rm = TRUE)))
-}
 
 # ==================== plots ====================
 pval_pool <- Filter(Negate(is.null), pval_pool)          # make_pval returns NULL for empty runs
