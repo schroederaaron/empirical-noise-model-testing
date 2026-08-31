@@ -6,7 +6,7 @@
 # fake groups ("A" vs "B"). There is no true differential expression between two
 # random halves of the same population, so this is the null hypothesis H0.
 #
-# We run the core TOX arms (raw, log), edgeR and limma-voom on the SAME H0 splits,
+# We run the core TOX arms (raw, log), edgeR, limma-voom and DESeq2 on the SAME H0 splits,
 # and sweep TOX's kNN neighbourhood size (K_GRID) to see how it affects calibration
 # (expected: little for raw, more for log). Optional TOX variants -- raw tail-trim and
 # edgeR-gene-set (degfilt) arms -- are commented out in TOX_ARMS for a cheaper sweep;
@@ -20,14 +20,14 @@
 # larger arms. Each result row is tagged with its per-group replicate count.
 #
 #   Under H0 a well-calibrated method must give:
-#     * raw p-values ~UNIFORM  => FPR@alpha ~= alpha  (edgeR / limma / TOX)
+#     * raw p-values ~UNIFORM  => FPR@alpha ~= alpha  (edgeR / limma / DESeq2 / TOX)
 #     * ~0 calls at its own significance threshold      (hits@FDR<0.05 ~= 0)
 #
 # What the comparison decides:
 #   * ALL methods ~calibrated  -> the DATASET is clean; the real-analysis
 #     precision gap is power / effect-size philosophy, not false positives.
 #   * only TOX inflated        -> a TOX null bug.
-#   * edgeR/limma inflated (esp. at large n, Stage I) -> the DEG tools
+#   * edgeR/limma/DESeq2 inflated (esp. at large n, Stage I) -> the DEG tools
 #     over-call under H0 -> the "reference" set contains false positives and is
 #     NOT ground truth (confirms the Stage-I hypothesis directly).
 #
@@ -164,6 +164,7 @@ ANY_SHARED_ARM <- any(vapply(TOX_ARMS, function(a) isTRUE(a$shared), logical(1))
 RUN_TOX    <- TRUE
 RUN_EDGER  <- TRUE
 RUN_LIMMA  <- TRUE
+RUN_DESEQ2 <- TRUE                       # SLOW reference (median-of-ratios NB GLM + Wald)
 
 # Independent random partitions ("runs"). The reported result is the MEAN over
 # these runs, with the across-run SD so a single lucky/unlucky split is visible
@@ -202,6 +203,7 @@ TOX_MODEL_FN <- tox_compute_noise_pvalues_pipeline_exact
 set.seed(42)
 
 if (RUN_EDGER || RUN_LIMMA) suppressMessages({library(edgeR); library(limma)})
+if (RUN_DESEQ2)             suppressMessages(library(DESeq2))
 
 # ==================== data loaders ====================
 
@@ -310,6 +312,20 @@ ref_limma <- function(counts, group) {
   topTable(fit, coef = 2, number = Inf, sort.by = "none")$P.Value
 }
 
+# DESeq2 (current standard): median-of-ratios size factors + NB GLM with empirical-Bayes
+# dispersion shrinkage; Wald test on the group coefficient. `results()` defaults to the
+# last coefficient (group B-vs-A here) and applies BH + independent filtering -- the latter
+# only NAs out `padj` for low-count genes; the raw `pvalue` we score for uniformity is still
+# returned (NAs are dropped downstream by pval_metrics). `quiet = TRUE` + suppressMessages
+# keep DESeq2's progress chatter out of the log. Note: DESeq2 is the SLOW reference.
+ref_deseq2 <- function(counts, group) {
+  dds <- DESeqDataSetFromMatrix(countData = round(counts),
+                                colData   = data.frame(group = group),
+                                design    = ~ group)
+  dds <- suppressMessages(DESeq(dds, quiet = TRUE))
+  as.numeric(results(dds)$pvalue)
+}
+
 # ==================== sweep ====================
 
 # Pure builders (return data.frames) so results can be collected OUT of parallel
@@ -360,13 +376,16 @@ run_one_split <- function(s, m_tpm, m_cnt, cname, stage, n_tox, n_cnt, m_tpm_sha
       if (!is.null(sp)) {
         grp <- factor(c(rep("A", length(sp$a)), rep("B", length(sp$b))))
         cnt <- m_cnt[, c(sp$a, sp$b), drop = FALSE]
-        # edgeR/limma are kNN-independent -> k_config = NA.
+        # edgeR/limma/DESeq2 are kNN-independent -> k_config = NA.
         if (RUN_EDGER) { pv <- tryCatch(ref_edgeR(cnt, grp), error = function(e) numeric(0))
           if (length(pv)) { rws <- c(rws, list(make_row("edgeR", cname, stage, s, n_cnt, sp$g, NA_character_, pval_metrics(pv))))
                             pvs <- c(pvs, list(make_pval("edgeR", cname, stage, sp$g, NA_character_, pv))) } }
         if (RUN_LIMMA) { pv <- tryCatch(ref_limma(cnt, grp), error = function(e) numeric(0))
           if (length(pv)) { rws <- c(rws, list(make_row("limma", cname, stage, s, n_cnt, sp$g, NA_character_, pval_metrics(pv))))
                             pvs <- c(pvs, list(make_pval("limma", cname, stage, sp$g, NA_character_, pv))) } }
+        if (RUN_DESEQ2) { pv <- tryCatch(ref_deseq2(cnt, grp), error = function(e) numeric(0))
+          if (length(pv)) { rws <- c(rws, list(make_row("DESeq2", cname, stage, s, n_cnt, sp$g, NA_character_, pval_metrics(pv))))
+                            pvs <- c(pvs, list(make_pval("DESeq2", cname, stage, sp$g, NA_character_, pv))) } }
       }
     }
   }
@@ -406,7 +425,7 @@ for (cname in names(CALIB_CANCERS)) {
       }
     }
     # ---- reference input: raw counts (genes x samples), native filters ----
-    m_cnt <- if (RUN_EDGER || RUN_LIMMA) load_counts_matrix(pid, stage) else NULL
+    m_cnt <- if (RUN_EDGER || RUN_LIMMA || RUN_DESEQ2) load_counts_matrix(pid, stage) else NULL
 
     n_tox <- if (!is.null(m_tpm)) nrow(m_tpm) else 0L
     n_cnt <- if (!is.null(m_cnt)) ncol(m_cnt) else 0L
@@ -603,5 +622,5 @@ cat("\n", paste(rep("=", 116), collapse = ""), "\n", sep = "")
 cat("DONE. CSVs + plots in:", OUT_DIR, "\n")
 cat("  * all methods ~calibrated        -> dataset is clean; precision gap is power/philosophy.\n")
 cat("  * only TOX inflated              -> TOX null bug.\n")
-cat("  * edgeR/limma inflated           -> the DEG references over-call under H0 (contain false positives).\n")
+cat("  * edgeR/limma/DESeq2 inflated    -> the DEG references over-call under H0 (contain false positives).\n")
 cat(paste(rep("=", 116), collapse = ""), "\n", sep = "")
