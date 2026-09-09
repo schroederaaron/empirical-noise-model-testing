@@ -2,7 +2,7 @@
 As of 23/08/2026
 
 ----
-![p-value distributions](./calibration_out/null_pvalue_qqplots.png)
+![p-value distributions](../Simulated_data/results/calibration_out/null_pvalue_qqplots.png)
 
 pvalue qq-plots of all tools under different distributions (n_rep = {3,5})
 

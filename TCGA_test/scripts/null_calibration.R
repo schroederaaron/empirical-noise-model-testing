@@ -19,6 +19,17 @@
 # small stage (e.g. small-cell lung Stage IV, ~13 samples) simply skips the
 # larger arms. Each result row is tagged with its per-group replicate count.
 #
+# NOTE on the p-value floor: it now differs by arm, so compare `min_p` against the
+# arm's own floor, not a single number. Per gene:
+#   exact                        1 / (n_pool_case * n_pool_control + 1)
+#   bootstrap, null = 0 or       1 / (N_BOOTSTRAP_DRAWS + 1)  (= 1e-4 at 10,000 draws)
+#     null = 1 above the cap
+#   bootstrap, null = 1 enumerated  1 / (W_case * W_control + 1),
+#                                W = (n_pool / n_rep) * n_rep^n_rep
+# e.g. k = 30 genes at n_rep = 3: 1.2e-4 (exact), 1.0e-4 (sampled), 1.5e-6 (enumerated).
+# BH at q needs the smallest p to reach q/G, so the floor decides whether an empty
+# hit list means "no signal" or "not resolvable".
+#
 #   Under H0 a well-calibrated method must give:
 #     * raw p-values ~UNIFORM  => FPR@alpha ~= alpha  (edgeR / limma / DESeq2 / TOX)
 #     * ~0 calls at its own significance threshold      (hits@FDR<0.05 ~= 0)
@@ -149,13 +160,38 @@ RUN_HEALTHY   <- TRUE                   # ALSO run the matched-normal (healthy) 
 # The commented arms below (results already collected) can be switched back on then.
 #   trim = raw-only pool tail-trim (Fortran ignores it under log);
 #   shared = TRUE runs on the edgeR/limma filterByExpr gene set (apples-to-apples).
+# `model` selects the null construction: "exact" (sqrt-scaled individual-residual
+# pairs) or "bootstrap" (differences of resampled MEANS). The bootstrap arms are
+# the direct test of the shape diagnosis in raw_anticonservative_diagnosis.R: the
+# raw model's anti-conservatism at alpha = 0.05 is attributed there to the exact
+# null keeping the INDIVIDUAL-residual shape while the observed statistic is a
+# difference of means, so a null built at the mean level should recover the 0.05
+# level. It is NOT expected to fix alpha = 0.01, since resampling cannot add tail
+# mass the pool does not contain -- if TOX-raw-boot fixes both, the diagnosis is
+# incomplete; if it fixes neither, it is wrong.
+# The trim arms test the opposite prediction: trimming the pool's tails narrows an
+# already-too-narrow core, so raw calibration at 0.05 should get WORSE, not better.
+# `null` selects the bootstrap module's null construction (ignored by "exact"):
+#   0 = POOLED  -- resample n_rep residuals iid from the whole neighbourhood pool
+#   1 = BLOCKED -- pick one neighbour GENE, resample within it, so each null mean
+#                  carries a single coherent noise level; exactly ENUMERATED (no RNG,
+#                  no 1/(n_boot+1) floor) wherever C(2n-1,n)*n_genes_pool fits the
+#                  Fortran cap, which covers n_rep <= 5 at k_max = 50.
+# The *-blocked arms are the ones to watch: the simulation work says the pooled
+# bootstrap is anti-conservative at alpha = 0.01 (1.4-2.0x) while blocking restores
+# it, and that the blocked null produces far fewer BH false positives under a
+# complete null. Both claims are about REAL data here for the first time.
 TOX_ARMS <- list(
-  list(norm = "log", trim = 0.0,  shared = FALSE, label = "TOX-log"),
-  list(norm = "raw", trim = 0.0,  shared = FALSE, label = "TOX-raw")
-  # , list(norm = "raw", trim = 0.01, shared = FALSE, label = "TOX-raw-trim01")
-  # , list(norm = "raw", trim = 0.02, shared = FALSE, label = "TOX-raw-trim02")
-  # , list(norm = "log", trim = 0.0,  shared = TRUE,  label = "TOX-log-degfilt")
-  # , list(norm = "raw", trim = 0.0,  shared = TRUE,  label = "TOX-raw-degfilt")
+  list(norm = "log", trim = 0.0,  shared = FALSE, model = "exact",     null = 0L, label = "TOX-log"),
+  list(norm = "raw", trim = 0.0,  shared = FALSE, model = "exact",     null = 0L, label = "TOX-raw"),
+  list(norm = "raw", trim = 0.0,  shared = FALSE, model = "bootstrap", null = 0L, label = "TOX-raw-boot"),
+  list(norm = "log", trim = 0.0,  shared = FALSE, model = "bootstrap", null = 0L, label = "TOX-log-boot"),
+  list(norm = "raw", trim = 0.0,  shared = FALSE, model = "bootstrap", null = 1L, label = "TOX-raw-blocked"),
+  list(norm = "log", trim = 0.0,  shared = FALSE, model = "bootstrap", null = 1L, label = "TOX-log-blocked"),
+  list(norm = "raw", trim = 0.02, shared = FALSE, model = "exact",     null = 0L, label = "TOX-raw-trim02"),
+  list(norm = "raw", trim = 0.05, shared = FALSE, model = "exact",     null = 0L, label = "TOX-raw-trim05")
+  # , list(norm = "log", trim = 0.0, shared = TRUE, model = "exact", null = 0L, label = "TOX-log-degfilt")
+  # , list(norm = "raw", trim = 0.0, shared = TRUE, model = "exact", null = 0L, label = "TOX-raw-degfilt")
 )
 # Only build the (costly) shared edgeR/limma gene set per cohort if a *-degfilt arm needs it.
 ANY_SHARED_ARM <- any(vapply(TOX_ARMS, function(a) isTRUE(a$shared), logical(1)))
@@ -199,7 +235,10 @@ K_GRID <- list(list(k_start = 20L, k_step = 1L, k_max = 50L, name = "k20_50"))
 #   lapply(c(30L, 40L, 50L), function(km)
 #     list(k_start = ks, k_step = 1L, k_max = km, name = sprintf("k%d_%d", ks, km)))))
 TAU <- 0.1; MAX_POOL <- 70000L
-TOX_MODEL_FN <- tox_compute_noise_pvalues_pipeline_exact
+# Both null constructions, selected per arm by `model` (see TOX_ARMS above).
+TOX_MODEL_FNS <- list(exact     = tox_compute_noise_pvalues_pipeline_exact,
+                      bootstrap = tox_compute_noise_pvalues_pipeline)
+TOX_MODEL_FN  <- TOX_MODEL_FNS$exact          # default for callers that pass no model
 
 set.seed(42)
 
@@ -262,7 +301,8 @@ pick_split <- function(n, size) {
 
 # ==================== TOX ====================
 
-run_tox_once <- function(raw_mat, norm_method, sp, trim_frac = 0.0, kcfg = K_GRID[[1]]) {
+run_tox_once <- function(raw_mat, norm_method, sp, trim_frac = 0.0, kcfg = K_GRID[[1]],
+                         model = "exact", null_method = 0L) {
   ng <- ncol(raw_mat)
   pa <- preprocess_replicates(raw_mat[sp$a, , drop = FALSE], norm_method)
   pb <- preprocess_replicates(raw_mat[sp$b, , drop = FALSE], norm_method)
@@ -275,12 +315,14 @@ run_tox_once <- function(raw_mat, norm_method, sp, trim_frac = 0.0, kcfg = K_GRI
   }
   obs_own <- as.numeric(obs_own); valid <- as.integer(is.finite(obs_own))
   obs_own[!is.finite(obs_own)] <- 0
-  res <- TOX_MODEL_FN(
+  model_fn <- TOX_MODEL_FNS[[model]]
+  if (is.null(model_fn)) stop("run_tox_once: unknown model '", model, "'")
+  res <- model_fn(
     case_means = as.numeric(pa$means), case_replicates = pa$prelog,
     control_means = as.numeric(pb$means), control_replicates = pb$prelog,
     obs_own = obs_own, valid_genes_own = valid,
     norm_method = norm_int, k_start = kcfg$k_start, k_step = kcfg$k_step, k_max = kcfg$k_max,
-    tau = TAU, trim_frac = trim_frac, max_pool_size = MAX_POOL)
+    tau = TAU, trim_frac = trim_frac, null_method = null_method, max_pool_size = MAX_POOL)
   p <- res$pvalues_own; p[p < 0 | p > 1] <- NA; p[!is.na(p)]
 }
 
@@ -364,7 +406,10 @@ run_one_split <- function(s, m_tpm, m_cnt, cname, stage, n_tox, n_cnt, m_tpm_sha
         if (isTRUE(arm$shared) && (is.null(m_tpm_shared) || !ncol(m_tpm_shared))) next
         mt_arm <- if (isTRUE(arm$shared)) m_tpm_shared else m_tpm
         for (kcfg in K_GRID) {
-          pv <- tryCatch(run_tox_once(mt_arm, arm$norm, sp, arm$trim, kcfg), error = function(e) numeric(0))
+          pv <- tryCatch(run_tox_once(mt_arm, arm$norm, sp, arm$trim, kcfg,
+                                      if (is.null(arm$model)) "exact" else arm$model,
+                                      if (is.null(arm$null)) 0L else arm$null),
+                         error = function(e) numeric(0))
           if (length(pv)) {
             rws <- c(rws, list(make_row(arm$label, cname, stage, s, n_tox, sp$g, kcfg$name, pval_metrics(pv))))
             pvs <- c(pvs, list(make_pval(arm$label, cname, stage, sp$g, kcfg$name, pv)))
