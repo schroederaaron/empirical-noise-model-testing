@@ -219,11 +219,25 @@ Representative per-method calibration (H0, so target FPR ≈ 0.05, hits_FDR05 �
   (FPR ≈ 0.08, p-values inflated/left-shifted — *not* uniform). `hits_FDR05 = 0` for raw only
   means the excess isn't extreme enough to cross BH at ~15k genes — it's **not** a calibration
   pass.
-- **Suspected cause:** in raw space variance grows steeply with the mean, so a kNN neighbourhood
-  pools **variance-heterogeneous** residuals → the empirical null is mis-scaled → p-values shift
-  down. Log space stabilises this, so TOX-log is fine.
-- **Being addressed** by the kNN-parameter sweep (tighter neighbourhoods / tail-trim should
-  tighten raw calibration). *Frame as "known, understood, in progress" — not a surprise.*
+- **Cause — now diagnosed (this is a nice "we chased it down" story):** in raw space a
+  mean-neighbourhood is mean-homogeneous but **not variance-homogeneous**, so the pooled
+  residuals are a **scale mixture**: the total variance is *correct*, but the **shape** is wrong —
+  a **narrow core with heavy tails**. A moderate observed distance lands too far out in that core
+  (anti-conservative at α = 0.05) while an extreme one is still covered (conservative at α = 0.01).
+  That two-sided pattern is exactly what the data shows, and it is the one pattern a *width* error
+  cannot produce. Log space stabilises the mean–variance trend, so TOX-log is unaffected.
+- **Two candidates were ruled OUT by the data** (say this — it's the strongest part):
+  - **Neighbourhood size (`k`) is not the cause.** Larger `k` helps consistently (128/128 paired
+    comparisons improve, so `k20_50` is the best config) but only closes about **one seventh** of
+    the gap — the raw excess is +0.64 while `k_max` 30→50 moves it by 0.005.
+  - **The null is not too narrow** — a width error can't be anti-conservative at 0.05 *and*
+    conservative at 0.01 simultaneously.
+- **The fix — the gene-blocked null:** draw all `n_rep` residuals from **one neighbour gene**
+  instead of from the pooled mixture, so every null mean carries a single coherent noise level.
+  That changes the null's **shape, not its width**. In simulation it moves FPR@0.01 from 0.0277
+  (pooled) to 0.0154, and — because resampling `n` of a gene's `n` residuals has only `C(2n−1, n)`
+  outcomes — it can be **enumerated exactly**: no RNG and no p-value floor.
+- *Frame as: "known, diagnosed, fix implemented — real-data validation is the next run."*
 
 ### 6d. Bottom line
 > **Proof of concept achieved.** TOX-log matches the best-behaved standard tool (limma) on
@@ -238,7 +252,11 @@ not yet a power/precision claim. Power is the complementary evaluation, next.)*
 
 ## 7. Open questions & next steps (≈1–2 min)
 
-- **Fix/understand TOX-raw** via the kNN sweep (neighbourhood width vs raw calibration).
+- **Validate the gene-blocked null on real data.** It is implemented and verified in simulation
+  (and against an independent R implementation to 1.65e-15); the TCGA split-half run is what
+  tests it. Watch `FPR_0.01` for `TOX-raw-boot` vs `TOX-raw-blocked` — simulation says pooled is
+  anti-conservative there (1.4–2.0×) and blocking restores it.
+- **kNN retuning is closed** — `k20_50` fixed as the best config; it is not the raw fix.
 - **Power / FDR-with-signal** evaluation (Part B) — show TOX keeps sensitivity, so "calibrated"
   isn't just "toothless".
 - **Planned noise-model extensions** — a well-calibrated null is the base they build on (name
@@ -265,8 +283,11 @@ not yet a power/precision claim. Power is the complementary evaluation, next.)*
 - **Empirical null:** noise distribution estimated from data (vs assumed).
 - **kNN neighbourhood:** genes with similar mean expression, pooled to estimate local noise.
 - **Bessel factor:** `√(n/(n−1))`, fixes residual under-dispersion (big at n=3: ~82%→100%).
-- **exact vs bootstrap:** deterministic pairwise tail (mildly conservative) vs 10,000-draw
-  mean-difference null (correct shape). TCGA results use **exact**.
+- **Three null constructions:** **exact** = deterministic pairwise tail, ÷√n (mildly
+  conservative); **pooled bootstrap** (`null_method=0`) = mean of `n` iid residuals drawn from the
+  whole pool (10,000 draws); **gene-blocked** (`null_method=1`) = mean of `n` residuals from **one
+  gene** — right shape, exactly enumerable (no RNG, no floor). Floors at k=30, n_rep=3:
+  1.2e-4 / 1.0e-4 / **1.5e-6**. `trim_frac` is ignored under blocked.
 - **Overdispersion / φ / BCV:** `Var = μ + φ·μ²`; `BCV = √φ`. TCGA: φ≈0.25–0.42, BCV≈0.5–0.65.
 - **FPR@0.05:** target 0.05. **hits_FDR05:** target 0 (any = false discovery under H0).
 - **KS / AD / CvM (`ks_D/ad_A2/cvm_W2`):** distance of p-values to uniform; 0 = perfect.
@@ -281,8 +302,10 @@ not yet a power/precision claim. Power is the complementary evaluation, next.)*
   n (Li et al. 2022); we want a method that doesn't rely on the NB tail.
 - **"Isn't 'well-calibrated' just being conservative?"** → No — p-values are *uniform* and
   median ≈ 0.5, not skewed high; and power is the next evaluation.
-- **"Why is TOX-raw off?"** → raw mean–variance trend makes the neighbourhood
-  variance-heterogeneous; being tuned via kNN. Log is unaffected and is calibrated.
+- **"Why is TOX-raw off?"** → the raw mean–variance trend makes the neighbourhood
+  variance-heterogeneous, so the pooled null is a **scale mixture** — right width, wrong
+  *shape* (narrow core, heavy tails). Not a `k` problem (ruled out: k closes ~1/7 of the gap)
+  and not a width problem. Fixed by the **gene-blocked null**; log is unaffected.
 - **"Is the half-split really H0?"** → yes: same population, random labels → no true DE by
   construction; the cleanest possible null, no effect-size threshold needed.
 - **"Poisson or NB?"** → strongly NB (100% of genes reject Poisson; BCV≈0.5) — as expected

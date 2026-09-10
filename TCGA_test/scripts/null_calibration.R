@@ -146,8 +146,11 @@ dir.create(PLOT_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # ==================== CONFIG ====================
 
-# All 8 TCGA cancers (was a 3-cancer subset: KIRC/LUAD/STAD). Subset for a quick run.
-CALIB_CANCERS <- CANCER_TYPES
+# Back to the focused 3-cancer subset: a mixture cancer (KIRC), a high-signal one (LUAD)
+# and a heavy-tailed-control one (STAD). Swap in `CANCER_TYPES` for the full 8-cancer run.
+CALIB_CANCERS <- CANCER_TYPES[c("kidney cancer",
+                                "non small cell lung cancer",
+                                "stomach cancer")]
 CALIB_STAGES  <- STAGES                 # the 4 cancer stages; restrict for speed, e.g. c("Stage I")
 RUN_HEALTHY   <- TRUE                   # ALSO run the matched-normal (healthy) cohort per cancer
                                         # (loaded via healthy_<pid>_counts.rds / the "healthy" TPM ref)
@@ -181,17 +184,23 @@ RUN_HEALTHY   <- TRUE                   # ALSO run the matched-normal (healthy) 
 # bootstrap is anti-conservative at alpha = 0.01 (1.4-2.0x) while blocking restores
 # it, and that the blocked null produces far fewer BH false positives under a
 # complete null. Both claims are about REAL data here for the first time.
+# THIS RUN: only raw + log, each in BOTH engines (exact and bootstrap) = 4 arms.
+# No trimming, no degfilt, no kNN sweep -- a clean 4-way engine x normalization
+# comparison on the 3-cancer subset. The blocked and trim arms below are kept ready
+# to re-enable (just uncomment); note the *-blocked arms are still the ones the
+# simulation work says need REAL-data validation, so switch them back on for the
+# follow-up run once this baseline is in.
 TOX_ARMS <- list(
   list(norm = "log", trim = 0.0,  shared = FALSE, model = "exact",     null = 0L, label = "TOX-log"),
   list(norm = "raw", trim = 0.0,  shared = FALSE, model = "exact",     null = 0L, label = "TOX-raw"),
   list(norm = "raw", trim = 0.0,  shared = FALSE, model = "bootstrap", null = 0L, label = "TOX-raw-boot"),
   list(norm = "log", trim = 0.0,  shared = FALSE, model = "bootstrap", null = 0L, label = "TOX-log-boot"),
   list(norm = "raw", trim = 0.0,  shared = FALSE, model = "bootstrap", null = 1L, label = "TOX-raw-blocked"),
-  list(norm = "log", trim = 0.0,  shared = FALSE, model = "bootstrap", null = 1L, label = "TOX-log-blocked"),
-  list(norm = "raw", trim = 0.02, shared = FALSE, model = "exact",     null = 0L, label = "TOX-raw-trim02"),
-  list(norm = "raw", trim = 0.05, shared = FALSE, model = "exact",     null = 0L, label = "TOX-raw-trim05")
-  # , list(norm = "log", trim = 0.0, shared = TRUE, model = "exact", null = 0L, label = "TOX-log-degfilt")
-  # , list(norm = "raw", trim = 0.0, shared = TRUE, model = "exact", null = 0L, label = "TOX-raw-degfilt")
+  list(norm = "log", trim = 0.0,  shared = FALSE, model = "bootstrap", null = 1L, label = "TOX-log-blocked")
+  # , list(norm = "raw", trim = 0.02, shared = FALSE, model = "exact",     null = 0L, label = "TOX-raw-trim02")
+  # , list(norm = "raw", trim = 0.05, shared = FALSE, model = "exact",     null = 0L, label = "TOX-raw-trim05")
+  # , list(norm = "log", trim = 0.0,  shared = TRUE,  model = "exact",     null = 0L, label = "TOX-log-degfilt")
+  # , list(norm = "raw", trim = 0.0,  shared = TRUE,  model = "exact",     null = 0L, label = "TOX-raw-degfilt")
 )
 # Only build the (costly) shared edgeR/limma gene set per cohort if a *-degfilt arm needs it.
 ANY_SHARED_ARM <- any(vapply(TOX_ARMS, function(a) isTRUE(a$shared), logical(1)))
@@ -223,12 +232,16 @@ ALPHAS           <- c(0.05, 0.01)
 SUBSAMPLE_SIZES  <- c(10L, 20L, 40L)     # per-group replicate counts to probe
 MIN_PER_GROUP    <- 3L                   # smallest usable group (full arm floor)
 
-# TOX kNN neighbourhood. The full SWEEP (below) runs every TOX arm at every config and is
-# VERY slow -- the 9-config sweep (k_start {8,15,20} x k_max {30,40,50}) was run ONCE
-# (~25 h over all 8 cancers) to answer whether neighbourhood size affects calibration.
-# For routine runs we FIX a single config to cut the TOX cost ~9x; SET THIS to whatever the
-# sweep identified as best (default k20_50 -- historically the best, and the plots' REF_K).
-# Uncomment the sweep block to reproduce it. The config name is recorded per row as `k_config`.
+# TOX kNN neighbourhood -- FIXED at the best config the 9-config sweep identified.
+# Evidence (docs/raw_normalisation_diagnosis.md §1.1, reproduce with
+# reanalyse_null_calibration_sweep.R): paired within (cancer, stage, replicate arm),
+# going from the smallest config to k20_50 improves inflation in 128/128 comparisons
+# (TOX-raw -0.093, TOX-log -0.109), i.e. LARGER k is consistently better -- so k20_50,
+# the largest tested, is the best of the grid. Note this also SETTLES the question:
+# k is NOT the cause of the raw arm's anti-conservatism (it closes only ~1/7 of the
+# 0.64 excess; k_max 30->50 moves it by 0.005) -- that is a null-SHAPE problem, which
+# is what the blocked null addresses. So no more sweeping: one config, evidence-backed.
+# (Uncomment the sweep block only if the grid itself ever needs revisiting.)
 K_GRID <- list(list(k_start = 20L, k_step = 1L, k_max = 50L, name = "k20_50"))
 # --- full sweep (uncomment to re-run; slow): ---
 # K_GRID <- do.call(c, lapply(c(8L, 15L, 20L), function(ks)

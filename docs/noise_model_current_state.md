@@ -1,7 +1,7 @@
 # Current State
-Current State as of 11.08.2026
+Current State as of 10.09.2026
 
-The development of the noise model is mainly complete. Two different models were implemented and are currently being tested.
+The development of the noise model is mainly complete. Two interchangeable models are implemented behind one ABI — **`exact`** (sqrt-scaling, deterministic) and **`bootstrap`** (mean-level null) — and the bootstrap module additionally offers two **null constructions**, selected by `null_method`: the original **pooled** null (`0`) and the **gene-blocked** null (`1`, exactly enumerated where it fits). All are currently under test.
 
 ## Sqrt Scaling approach (model: "exact")
 This model works as described in issue 145. For each gene it builds a residual pool in case and an independent residual pool in control from the mean-expression neighborhood (mean-centered, Bessel-corrected). The null is the distribution of the pairwise absolute differences `|r_case - r_control|` over every case×control residual pair — a direct measure of how much case-vs-control distance noise alone can produce. The p-value is the add-one-corrected fraction of those pairwise differences that reach or exceed the observed `|mean_case - mean_control|`.
@@ -33,6 +33,28 @@ where the observed statistic is `|mean_case - mean_control|` on the residual sca
 Why this fixes the over-conservatism: the null is now a difference of two means-of-`n_rep`, so it carries the correct sampling variance `sigma^2_case / n_case + sigma^2_control / n_control` — matching the observed mean-difference directly, without the `sqrt(n_rep)` widening that the exact model has to live with. Each side is resampled from its own pool at its own `n_rep`, so there is **no equal-variance assumption** between case and control, and because the residuals are mean-centered the null is centered at zero shift (a true H0). Two boundaries fall out exactly: `|observed| = 0` gives `p = 1`, and an observed larger than any null distance gives `p = 1/(n_boot + 1)`.
 
 The cost is that the null is sampled rather than computed in closed form, so it is slower than the exact model. The RNG is seeded once by `init_random(42)` at the start of the pipeline, so results are reproducible.
+
+## Null construction: pooled vs gene-blocked (`null_method`)
+
+The bootstrap module offers **two ways to build the mean-level null**, selected by the ABI parameter **`null_method`** (an integer, default `0`). The exact module accepts the argument so both C entry points keep an identical ABI, but **rejects any non-zero value** with `ierr = ERR_INVALID_INPUT` rather than silently ignoring it.
+
+**`null_method = 0` — POOLED (the original behaviour).** Each draw resamples `n_rep` residuals **iid from the whole neighbourhood pool** and averages them. Because a mean-expression neighbourhood is mean-homogeneous but *not* variance-homogeneous, one draw can mix a residual from a quiet gene with one from a noisy gene — a combination no real gene's mean ever produces. The pooled residuals are therefore a **scale mixture**: the total variance is right, but the shape is wrong — a narrow core with heavy tails.
+
+**`null_method = 1` — GENE-BLOCKED.** Each draw first picks one neighbour **gene**, then resamples `n_rep` residuals **within that gene**, so every null mean carries a **single coherent noise level**. This changes the null's *shape*, not its width, and it is the construction that addresses the raw arm's anti-conservatism (see `docs/raw_normalisation_diagnosis.md`).
+
+Because resampling `n` of a gene's `n` residuals with replacement has only `C(2n-1, n)` distinct outcomes, the entire blocked null can be **written down exactly** as `n_genes_pool * C(2n-1, n)` weighted values per side and scored with the same sorted-array + binary-search tail count the exact model already uses — **no RNG and no `1/(n_boot+1)` floor**. Above the enumeration cap (`BLOCKED_MAX_ENUM_VALUES`, default 8000 — covers roughly `n_rep <= 5` at `k_max = 50`) it falls back to *sampling* the same blocked null.
+
+Resolution (the p-value floor) therefore depends on the arm:
+
+| construction | floor |
+|---|---|
+| exact | `1 / (n_pool_case * n_pool_control + 1)` |
+| bootstrap, pooled (or blocked above the cap) | `1 / (N_BOOTSTRAP_DRAWS + 1)` |
+| bootstrap, blocked & enumerated | `1 / (W_case * W_control + 1)`, `W = (n_pool / n_rep) * n_rep**n_rep` |
+
+**Caveat:** `trim_frac` is **ignored** under `null_method = 1` — trimming sorts the pool in place, which destroys the per-gene block layout the blocked null reads, so the alloc layer forces it to 0. Trim + blocked is not a valid combination.
+
+**RNG:** `random_number` is now called once per **chunk** of draws (a single array fill sized by `RNG_BUFFER_MAX`, allocated once and reused per gene) instead of once per draw — typically one RNG call per gene instead of `N_BOOTSTRAP_DRAWS`. The pooled arm is bit-for-bit unchanged by this (verified: `max |p_old - p_new| = 0`); the enumerated blocked path uses no RNG at all.
 
 ## The Bessel correction
 
