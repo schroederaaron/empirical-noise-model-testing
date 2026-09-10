@@ -86,7 +86,7 @@ B_DRAWS   <- 5000L
 N_RUNS    <- 16L
 CV_HET    <- c(0.0, 0.4, 0.7)     # variance heterogeneity left inside a mean-neighbourhood
 N_REP     <- c(3L, 10L)
-N_CORES   <- max(1L, min(8L, detectCores() - 1L))
+N_CORES   <- 32L
 
 #' H0 cohort: right-skewed means, per-gene CV dispersed by `cv_het`, gamma counts.
 make_cohort <- function(G, N, cv_het, cv0 = 0.45) {
