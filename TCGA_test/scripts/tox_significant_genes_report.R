@@ -73,6 +73,15 @@
 # RUN:  Rscript tox_significant_genes_report.R          (from TCGA_test/scripts)
 # -----------------------------------------------------------------------------
 
+# --- persistent R package library (MUST precede any library()/require()/source() call) ---
+# `.libPaths()` silently DROPS non-existent directories, so the folder has to be created
+# FIRST or the prepend is a no-op and packages land in the ephemeral container library.
+LIB_DIR <- normalizePath("external/docker_r_libs", mustWork = FALSE)
+if (!dir.create(LIB_DIR, recursive = TRUE, showWarnings = FALSE) && !dir.exists(LIB_DIR))
+  stop("Could not create package library ", LIB_DIR,
+       " -- it must be on a WRITABLE, BIND-MOUNTED path or packages will not persist.")
+.libPaths(c(LIB_DIR, .libPaths()))
+
 suppressMessages({library(dplyr); library(data.table)})
 source("outlier_significance_analysis.R")
 source("config.R")

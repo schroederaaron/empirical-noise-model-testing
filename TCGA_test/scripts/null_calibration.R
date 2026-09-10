@@ -52,6 +52,7 @@ if (!dir.create(LIB_DIR, recursive = TRUE, showWarnings = FALSE) && !dir.exists(
   stop("Could not create package library ", LIB_DIR,
        " -- it must be on a WRITABLE, BIND-MOUNTED path or packages will not persist.")
 .libPaths(c(LIB_DIR, .libPaths()))
+
 cat(sprintf("R package library: %s  (exists=%s, libPaths[1]=%s)\n",
             LIB_DIR, dir.exists(LIB_DIR), .libPaths()[1]))
 

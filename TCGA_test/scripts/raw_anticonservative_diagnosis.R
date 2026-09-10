@@ -88,6 +88,15 @@
 # RUN:  Rscript raw_anticonservative_diagnosis.R          (from TCGA_test/scripts)
 # -----------------------------------------------------------------------------
 
+# --- persistent R package library (MUST precede any library()/require()/source() call) ---
+# `.libPaths()` silently DROPS non-existent directories, so the folder has to be created
+# FIRST or the prepend is a no-op and packages land in the ephemeral container library.
+LIB_DIR <- normalizePath("external/docker_r_libs", mustWork = FALSE)
+if (!dir.create(LIB_DIR, recursive = TRUE, showWarnings = FALSE) && !dir.exists(LIB_DIR))
+  stop("Could not create package library ", LIB_DIR,
+       " -- it must be on a WRITABLE, BIND-MOUNTED path or packages will not persist.")
+.libPaths(c(LIB_DIR, .libPaths()))
+
 suppressMessages({library(dplyr); library(data.table)})
 source("outlier_significance_analysis.R")   # loaders, preprocess_replicates, wrappers
 source("config.R")
@@ -235,7 +244,16 @@ for (cname in names(DIAG_CANCERS)) {
 }
 if (!length(per_gene)) stop("No cohorts produced diagnostics -- check BASE_DATA_DIR.")
 PG <- as.data.frame(rbindlist(per_gene, fill = TRUE))
-fwrite(PG, file.path(OUT_DIR, "per_gene_diagnostics.csv.gz"))
+# fwrite's gzip compression needs data.table built against zlib headers; not every
+# installation has that (symptom: "Its header files were not found at the time
+# data.table was compiled"). Try compressed first (smaller, and used automatically
+# once a zlib-enabled data.table is installed); fall back to a plain .csv on ANY
+# fwrite error rather than aborting the whole diagnosis run over an output-format issue.
+pg_path_gz <- file.path(OUT_DIR, "per_gene_diagnostics.csv.gz")
+ok <- tryCatch({ fwrite(PG, pg_path_gz); TRUE },
+               error = function(e) { message("  fwrite (gz) failed, writing uncompressed instead: ",
+                                             conditionMessage(e)); FALSE })
+if (!ok) fwrite(PG, file.path(OUT_DIR, "per_gene_diagnostics.csv"))
 
 # ---- Part 1: what the pools are made of -------------------------------------
 # rho = sd_own / sd_pool. Its spread across genes is variance heterogeneity

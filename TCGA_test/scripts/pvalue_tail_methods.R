@@ -49,6 +49,15 @@
 
 # tox_null_reimpl.R lives in common/; the repo's scripts are run from more than one
 # working directory, so look for it rather than assuming one.
+# --- persistent R package library (MUST precede any library()/require()/source() call) ---
+# `.libPaths()` silently DROPS non-existent directories, so the folder has to be created
+# FIRST or the prepend is a no-op and packages land in the ephemeral container library.
+LIB_DIR <- normalizePath("external/docker_r_libs", mustWork = FALSE)
+if (!dir.create(LIB_DIR, recursive = TRUE, showWarnings = FALSE) && !dir.exists(LIB_DIR))
+  stop("Could not create package library ", LIB_DIR,
+       " -- it must be on a WRITABLE, BIND-MOUNTED path or packages will not persist.")
+.libPaths(c(LIB_DIR, .libPaths()))
+
 .source_reimpl <- function() {
   cands <- c("tox_null_reimpl.R", "common/tox_null_reimpl.R", "../../common/tox_null_reimpl.R",
              "../common/tox_null_reimpl.R", "../../../common/tox_null_reimpl.R")

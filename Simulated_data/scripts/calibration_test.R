@@ -46,15 +46,16 @@
 #   stop being null.
 # =============================================================================
 
-source("config.R")
-
-# Fixed library location for both loading AND installing packages. `.libPaths()`
-# silently DROPS non-existent directories, so the folder must be created FIRST or
-# the prepend is a no-op (installs would fall back to the default user library).
-# The path is anchored absolutely so it does not depend on the working directory.
+# --- persistent R package library (MUST precede any library()/require()/source() call) ---
+# `.libPaths()` silently DROPS non-existent directories, so the folder has to be created
+# FIRST or the prepend is a no-op and packages land in the ephemeral container library.
 LIB_DIR <- normalizePath("external/docker_r_libs", mustWork = FALSE)
-dir.create(LIB_DIR, recursive = TRUE, showWarnings = FALSE)
+if (!dir.create(LIB_DIR, recursive = TRUE, showWarnings = FALSE) && !dir.exists(LIB_DIR))
+  stop("Could not create package library ", LIB_DIR,
+       " -- it must be on a WRITABLE, BIND-MOUNTED path or packages will not persist.")
 .libPaths(c(LIB_DIR, .libPaths()))
+
+source("config.R")
 
 # Name the package that is ACTUALLY missing from a load error. `library()` names
 # the package being loaded FIRST, e.g.
