@@ -41,7 +41,7 @@ suppressMessages({library(dplyr)})
 options(width = 200)
 
 args <- commandArgs(trailingOnly = TRUE)
-src  <- if (length(args)) args[1] else "../results/null_calibration_9414.out"
+src  <- if (length(args)) args[1] else "null_calibration_9414.out"
 if (!file.exists(src)) stop("Input not found: ", src)
 
 # --- read ---------------------------------------------------------------------
