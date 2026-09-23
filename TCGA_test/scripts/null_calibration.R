@@ -8,7 +8,7 @@
 #
 # We run the core TOX arms (raw, log), edgeR, limma-voom and DESeq2 on the SAME H0 splits,
 # and sweep TOX's kNN neighbourhood size (K_GRID) to see how it affects calibration
-# (expected: little for raw, more for log). Optional TOX variants -- raw tail-trim and
+# (expected: little for raw, more for log). Optional TOX variants --
 # edgeR-gene-set (degfilt) arms -- are commented out in TOX_ARMS for a cheaper sweep;
 # re-enable them at the single best kNN config once this identifies one.
 #
@@ -156,13 +156,12 @@ CALIB_STAGES  <- STAGES                 # the 4 cancer stages; restrict for spee
 RUN_HEALTHY   <- TRUE                   # ALSO run the matched-normal (healthy) cohort per cancer
                                         # (loaded via healthy_<pid>_counts.rds / the "healthy" TPM ref)
 
-# TOX arms: each is a (norm, trim, shared, label).
-# For the kNN sweep we run only the CORE log + raw arms (no trim, no degfilt): the k
-# effect is a norm question, so if k doesn't move log/raw calibration here it won't move
-# the trim/degfilt variants either -- and if it DOES, we re-enable those variants at the
+# TOX arms: each is a (norm, shared, label).
+# For the kNN sweep we run only the CORE log + raw arms (no degfilt): the k effect is
+# a norm question, so if k doesn't move log/raw calibration here it won't move the
+# degfilt variants either -- and if it DOES, we re-enable those variants at the
 # single best kNN config identified here (much cheaper than sweeping all arms x all k).
 # The commented arms below (results already collected) can be switched back on then.
-#   trim = raw-only pool tail-trim (Fortran ignores it under log);
 #   shared = TRUE runs on the edgeR/limma filterByExpr gene set (apples-to-apples).
 # `model` selects the null construction: "exact" (sqrt-scaled individual-residual
 # pairs) or "bootstrap" (differences of resampled MEANS). The bootstrap arms are
@@ -173,8 +172,9 @@ RUN_HEALTHY   <- TRUE                   # ALSO run the matched-normal (healthy) 
 # level. It is NOT expected to fix alpha = 0.01, since resampling cannot add tail
 # mass the pool does not contain -- if TOX-raw-boot fixes both, the diagnosis is
 # incomplete; if it fixes neither, it is wrong.
-# The trim arms test the opposite prediction: trimming the pool's tails narrows an
-# already-too-narrow core, so raw calibration at 0.05 should get WORSE, not better.
+# (The raw tail-trim arms that used to sit here are gone: trimming narrows an
+# already-too-narrow core, it measurably made raw calibration worse, and the knob
+# has been removed from the model entirely.)
 # `null` selects the bootstrap module's null construction (ignored by "exact"):
 #   0 = POOLED  -- resample n_rep residuals iid from the whole neighbourhood pool
 #   1 = BLOCKED -- pick one neighbour GENE, resample within it, so each null mean
@@ -185,26 +185,67 @@ RUN_HEALTHY   <- TRUE                   # ALSO run the matched-normal (healthy) 
 # bootstrap is anti-conservative at alpha = 0.01 (1.4-2.0x) while blocking restores
 # it, and that the blocked null produces far fewer BH false positives under a
 # complete null. Both claims are about REAL data here for the first time.
-# THIS RUN: only raw + log, each in BOTH engines (exact and bootstrap) = 4 arms.
-# No trimming, no degfilt, no kNN sweep -- a clean 4-way engine x normalization
-# comparison on the 3-cancer subset. The blocked and trim arms below are kept ready
-# to re-enable (just uncomment); note the *-blocked arms are still the ones the
-# simulation work says need REAL-data validation, so switch them back on for the
-# follow-up run once this baseline is in.
+# THIS RUN: only raw + log, each in BOTH engines (exact and bootstrap), pooled and
+# blocked nulls. No degfilt, no kNN sweep -- a clean engine x normalization x null
+# comparison on the 3-cancer subset. The degfilt arms below are kept ready to
+# re-enable (just uncomment).
 TOX_ARMS <- list(
-  list(norm = "log", trim = 0.0,  shared = FALSE, model = "exact",     null = 0L, label = "TOX-log"),
-  list(norm = "raw", trim = 0.0,  shared = FALSE, model = "exact",     null = 0L, label = "TOX-raw"),
-  list(norm = "raw", trim = 0.0,  shared = FALSE, model = "bootstrap", null = 0L, label = "TOX-raw-boot"),
-  list(norm = "log", trim = 0.0,  shared = FALSE, model = "bootstrap", null = 0L, label = "TOX-log-boot"),
-  list(norm = "raw", trim = 0.0,  shared = FALSE, model = "bootstrap", null = 1L, label = "TOX-raw-blocked"),
-  list(norm = "log", trim = 0.0,  shared = FALSE, model = "bootstrap", null = 1L, label = "TOX-log-blocked")
-  # , list(norm = "raw", trim = 0.02, shared = FALSE, model = "exact",     null = 0L, label = "TOX-raw-trim02")
-  # , list(norm = "raw", trim = 0.05, shared = FALSE, model = "exact",     null = 0L, label = "TOX-raw-trim05")
-  # , list(norm = "log", trim = 0.0,  shared = TRUE,  model = "exact",     null = 0L, label = "TOX-log-degfilt")
-  # , list(norm = "raw", trim = 0.0,  shared = TRUE,  model = "exact",     null = 0L, label = "TOX-raw-degfilt")
+  list(norm = "log", shared = FALSE, model = "exact",     null = 0L, label = "TOX-log"),
+  list(norm = "raw", shared = FALSE, model = "exact",     null = 0L, label = "TOX-raw"),
+  list(norm = "raw", shared = FALSE, model = "bootstrap", null = 0L, label = "TOX-raw-boot"),
+  list(norm = "log", shared = FALSE, model = "bootstrap", null = 0L, label = "TOX-log-boot"),
+  list(norm = "raw", shared = FALSE, model = "bootstrap", null = 1L, label = "TOX-raw-blocked"),
+  list(norm = "log", shared = FALSE, model = "bootstrap", null = 1L, label = "TOX-log-blocked")
+  # , list(norm = "log", shared = TRUE,  model = "exact",     null = 0L, label = "TOX-log-degfilt")
+  # , list(norm = "raw", shared = TRUE,  model = "exact",     null = 0L, label = "TOX-raw-degfilt")
 )
 # Only build the (costly) shared edgeR/limma gene set per cohort if a *-degfilt arm needs it.
 ANY_SHARED_ARM <- any(vapply(TOX_ARMS, function(a) isTRUE(a$shared), logical(1)))
+
+# ---------------- normalisation comparison: counts vs TPM ----------------
+# Plan section 6 / validation item 12 of md_noise_model_plan_independent_axes.md, run
+# here at d = 1 where it is cheap and directly comparable to everything else in this
+# sweep. The question it settles is which input scale TOX should take, decided
+# EMPIRICALLY rather than argued from the literature.
+#
+# Why it matters. TPM is compositional: log2FC = beta - Delta with Delta identical
+# for every gene, and TOX's null -- built from WITHIN-group residuals -- contains no
+# information about a BETWEEN-group offset. Running uncorrected is therefore not the
+# assumption-free option, it is the assumption Delta = 0. Two ways to do better:
+#   * correct on the TPM itself  -> `beta_centre = 1`, i.e. subtract the per-axis
+#     MEDIAN of beta across genes (median centring of log-ratios). Assumes only that
+#     the median gene is unchanged, which is strictly weaker than Delta = 0.
+#   * normalise the COUNTS instead -> TMM (edgeR) or median-of-ratios (DESeq2), the
+#     same estimator family but with weights that come from count magnitudes, which
+#     do not exist on TPM.
+# Naming, so the comparison is labelled honestly: what the `-centred` arm does is
+# median centring of log-ratios, NOT TMM.
+#
+# A second, separate reason to expect counts to win shows up in POWER rather than
+# calibration (so this null run will not see it): TPM removes the count magnitude,
+# which is what predicts technical precision, and its length correction works against
+# the kNN matching -- at equal TPM a longer gene carries more counts and is more
+# precise, roughly a 4-5x CV spread across 500 bp - 10 kb among genes the matcher
+# treats as equivalent.
+#
+# Kept deliberately small: 4 arms, ONE kNN config, the full half split only, and a
+# 3-cancer x 3-stage subset. Everything except the input scale is held fixed --
+# same samples, same genes, same split -- or the comparison confounds normalisation
+# with cohort differences.
+RUN_NORM_TEST <- TRUE
+NORM_STAGES   <- c("healthy", "Stage I", "Stage IV")   # a low and a high stage, plus the normals
+NORM_SIZES    <- c(0L)                                 # full half split only (0L); n-dependence
+                                                       # is already answered by the main sweep
+NORM_ARMS <- list(
+  list(input = "tpm", centre = 0L, label = "NORM-TPM"),
+  list(input = "tpm", centre = 1L, label = "NORM-TPM-centred"),
+  list(input = "tmm", centre = 0L, label = "NORM-TMM"),
+  list(input = "mor", centre = 0L, label = "NORM-MoR")
+)
+# All four are TOX-log in the `exact` engine with the pooled null -- only the input
+# scale and `centre` vary. NORM-TPM is therefore the same computation as the TOX-log
+# arm above (on the matched gene/sample subset), which makes it a built-in
+# consistency check on this whole block.
 
 # Which methods to run.
 RUN_TOX    <- TRUE
@@ -256,8 +297,8 @@ TOX_MODEL_FN  <- TOX_MODEL_FNS$exact          # default for callers that pass no
 
 set.seed(42)
 
-if (RUN_EDGER || RUN_LIMMA) suppressMessages({library(edgeR); library(limma)})
-if (RUN_DESEQ2)             suppressMessages(library(DESeq2))
+if (RUN_EDGER || RUN_LIMMA || RUN_NORM_TEST) suppressMessages({library(edgeR); library(limma)})
+if (RUN_DESEQ2 || RUN_NORM_TEST)             suppressMessages(library(DESeq2))
 
 # ==================== data loaders ====================
 
@@ -315,8 +356,18 @@ pick_split <- function(n, size) {
 
 # ==================== TOX ====================
 
-run_tox_once <- function(raw_mat, norm_method, sp, trim_frac = 0.0, kcfg = K_GRID[[1]],
-                         model = "exact", null_method = 0L) {
+#' One TOX run on one A/B split.
+#'
+#' `beta_centre = 1L` subtracts the per-gene MEDIAN of the observed statistic across
+#' genes before scoring -- the composition correction of plan section 6. At d = 1
+#' that is exactly what `noise_model_md`'s `beta_centre` does (its `delta_hat` is the
+#' median of beta over genes), so it is done here in R rather than routed through the
+#' multidimensional entry point: the scalar `exact` module computes the same p-value
+#' in O((n+m) log m) via its sorted-pool binary search, while the d-dimensional module
+#' would have to enumerate or sample the n_pool_case * n_pool_ctrl pairs explicitly.
+#' Same answer, and much faster at the pool sizes this sweep uses.
+run_tox_once <- function(raw_mat, norm_method, sp, kcfg = K_GRID[[1]],
+                         model = "exact", null_method = 0L, beta_centre = 0L) {
   ng <- ncol(raw_mat)
   pa <- preprocess_replicates(raw_mat[sp$a, , drop = FALSE], norm_method)
   pb <- preprocess_replicates(raw_mat[sp$b, , drop = FALSE], norm_method)
@@ -328,6 +379,12 @@ run_tox_once <- function(raw_mat, norm_method, sp, trim_frac = 0.0, kcfg = K_GRI
                colMeans(log2(pb$prelog + 1), na.rm = TRUE)
   }
   obs_own <- as.numeric(obs_own); valid <- as.integer(is.finite(obs_own))
+  # Composition centring, before the non-finite genes are zeroed (they must not
+  # contribute to the median, and `valid` already excludes them from the test).
+  if (isTRUE(beta_centre == 1L)) {
+    delta_hat <- median(obs_own[is.finite(obs_own)])
+    if (is.finite(delta_hat)) obs_own <- obs_own - delta_hat
+  }
   obs_own[!is.finite(obs_own)] <- 0
   model_fn <- TOX_MODEL_FNS[[model]]
   if (is.null(model_fn)) stop("run_tox_once: unknown model '", model, "'")
@@ -336,8 +393,60 @@ run_tox_once <- function(raw_mat, norm_method, sp, trim_frac = 0.0, kcfg = K_GRI
     control_means = as.numeric(pb$means), control_replicates = pb$prelog,
     obs_own = obs_own, valid_genes_own = valid,
     norm_method = norm_int, k_start = kcfg$k_start, k_step = kcfg$k_step, k_max = kcfg$k_max,
-    tau = TAU, trim_frac = trim_frac, null_method = null_method, max_pool_size = MAX_POOL)
+    tau = TAU, null_method = null_method, max_pool_size = MAX_POOL)
   p <- res$pvalues_own; p[p < 0 | p > 1] <- NA; p[!is.na(p)]
+}
+
+#' Build the three input scales for the normalisation comparison, matched.
+#'
+#' Returns `list(tpm =, tmm =, mor =)`, each samples x genes over the SAME samples
+#' and the SAME genes, or NULL when the cohort cannot supply them. Matching is the
+#' whole point: `m_tpm` and `m_cnt` arrive with different sample sets (different
+#' loaders) and different gene sets (TOX's keep mask vs the raw count rows), and the
+#' main sweep gives them independent splits. Comparing normalisations across those
+#' would confound the input scale with the cohort and the gene set.
+#'
+#' Normalisation factors are estimated on the FULL cohort, before splitting -- that
+#' is how they would be used in practice, and since both fake groups are drawn from
+#' one cohort it cannot manufacture a difference between them.
+#'
+#'   tmm: edgeR TMM factors -> CPM (`normLibSizes` + `cpm`), linear scale.
+#'   mor: DESeq2 median-of-ratios size factors -> counts divided per sample.
+#'
+#' Both are left on a LINEAR scale: TOX applies log2(x + 1) internally for
+#' `norm_method = "log"`.
+build_norm_inputs <- function(m_tpm, m_cnt) {
+  if (is.null(m_tpm) || is.null(m_cnt)) return(NULL)
+  samp <- intersect(rownames(m_tpm), colnames(m_cnt))
+  gene <- intersect(colnames(m_tpm), rownames(m_cnt))
+  if (length(samp) < 2L * MIN_PER_GROUP || length(gene) < 100L) {
+    # Say WHY. The TPM and count matrices come from different loaders, so an empty
+    # intersection almost always means the two use different sample- or gene-ID
+    # conventions, not that the cohort is too small -- and those look identical
+    # from a bare "skipped" line.
+    message(sprintf("  build_norm_inputs: only %d matched samples (of %d TPM / %d count) and %d matched genes (of %d / %d)",
+                    length(samp), nrow(m_tpm), ncol(m_cnt),
+                    length(gene), ncol(m_tpm), nrow(m_cnt)))
+    return(NULL)
+  }
+
+  cnt <- m_cnt[gene, samp, drop = FALSE]
+  tpm <- m_tpm[samp, gene, drop = FALSE]
+
+  # Each scale fails independently: a broken MoR must not silently take the TPM and
+  # TMM arms down with it, or the block would look like it simply did not run.
+  tmm <- tryCatch({
+    dge <- edgeR::normLibSizes(edgeR::DGEList(counts = cnt))
+    t(edgeR::cpm(dge, normalized.lib.sizes = TRUE))
+  }, error = function(e) { message("  build_norm_inputs: TMM failed -- ", conditionMessage(e)); NULL })
+
+  mor <- tryCatch({
+    sf <- DESeq2::estimateSizeFactorsForMatrix(cnt)
+    if (!all(is.finite(sf)) || any(sf <= 0)) stop("non-finite or non-positive size factors")
+    t(sweep(cnt, 2L, sf, "/"))          # cnt is genes x samples -> divide per SAMPLE
+  }, error = function(e) { message("  build_norm_inputs: MoR failed -- ", conditionMessage(e)); NULL })
+
+  list(tpm = tpm, tmm = tmm, mor = mor)
 }
 
 # ==================== reference methods (native counts) ====================
@@ -407,9 +516,31 @@ make_pval <- function(method, cancer, stage, n_per_group, k_config, pv) {
 # arm (full half + every feasible fixed size) it draws an independent A/B split
 # and runs every method at that per-group replicate count, tagging each row with
 # n_per_group. Pure (no globals) so it is safe inside an mclapply worker.
-run_one_split <- function(s, m_tpm, m_cnt, cname, stage, n_tox, n_cnt, m_tpm_shared = NULL) {
+run_one_split <- function(s, m_tpm, m_cnt, cname, stage, n_tox, n_cnt, m_tpm_shared = NULL,
+                          m_norm = NULL) {
   rws <- list(); pvs <- list()
   arms <- c(0L, SUBSAMPLE_SIZES)      # 0L = full half split; rest = fixed per-group sizes
+
+  # ---- normalisation comparison: counts vs TPM, everything else held fixed ----
+  # One split per size, SHARED by all four arms, so the only thing that differs
+  # between them is the input scale and `centre`.
+  if (!is.null(m_norm)) for (size in NORM_SIZES) {
+    spn <- pick_split(nrow(m_norm$tpm), size)
+    if (is.null(spn)) next
+    kcfg <- K_GRID[[1]]
+    for (arm in NORM_ARMS) {
+      mat <- m_norm[[arm$input]]
+      if (is.null(mat)) next
+      pv <- tryCatch(run_tox_once(mat, "log", spn, kcfg, "exact", 0L, arm$centre),
+                     error = function(e) numeric(0))
+      if (length(pv)) {
+        rws <- c(rws, list(make_row(arm$label, cname, stage, s, nrow(mat), spn$g,
+                                    kcfg$name, pval_metrics(pv))))
+        pvs <- c(pvs, list(make_pval(arm$label, cname, stage, spn$g, kcfg$name, pv)))
+      }
+    }
+  }
+
   for (size in arms) {
     if (!is.null(m_tpm)) {
       sp <- pick_split(n_tox, size)   # split is over SAMPLES; the same sp serves every TOX arm
@@ -420,7 +551,7 @@ run_one_split <- function(s, m_tpm, m_cnt, cname, stage, n_tox, n_cnt, m_tpm_sha
         if (isTRUE(arm$shared) && (is.null(m_tpm_shared) || !ncol(m_tpm_shared))) next
         mt_arm <- if (isTRUE(arm$shared)) m_tpm_shared else m_tpm
         for (kcfg in K_GRID) {
-          pv <- tryCatch(run_tox_once(mt_arm, arm$norm, sp, arm$trim, kcfg,
+          pv <- tryCatch(run_tox_once(mt_arm, arm$norm, sp, kcfg,
                                       if (is.null(arm$model)) "exact" else arm$model,
                                       if (is.null(arm$null)) 0L else arm$null),
                          error = function(e) numeric(0))
@@ -485,7 +616,8 @@ for (cname in names(CALIB_CANCERS)) {
       }
     }
     # ---- reference input: raw counts (genes x samples), native filters ----
-    m_cnt <- if (RUN_EDGER || RUN_LIMMA || RUN_DESEQ2) load_counts_matrix(pid, stage) else NULL
+    m_cnt <- if (RUN_EDGER || RUN_LIMMA || RUN_DESEQ2 || RUN_NORM_TEST)
+               load_counts_matrix(pid, stage) else NULL
 
     n_tox <- if (!is.null(m_tpm)) nrow(m_tpm) else 0L
     n_cnt <- if (!is.null(m_cnt)) ncol(m_cnt) else 0L
@@ -503,18 +635,33 @@ for (cname in names(CALIB_CANCERS)) {
       if (length(shared_ids) >= 10L) m_tpm_shared <- m_tpm_full[, shared_ids, drop = FALSE]
     }
 
+    # ---- matched input scales for the normalisation comparison (TPM / TMM / MoR).
+    #      Built once per cohort, on the full sample set, and only for the stages the
+    #      comparison actually runs on. ----
+    m_norm <- NULL
+    if (RUN_NORM_TEST && stage %in% NORM_STAGES) {
+      m_norm <- tryCatch(build_norm_inputs(m_tpm, m_cnt), error = function(e) NULL)
+      if (is.null(m_norm))
+        cat(sprintf("    %-10s  norm-test inputs unavailable (no matched samples/genes); skipped\n",
+                    stage))
+    }
+
     # ---- N_SPLITS runs IN PARALLEL over N_CORES. mc.silent = TRUE swallows ALL
     #      child stdout, which also silences the noisy per-call debug prints that
     #      used to flood the log. ----
     res_list <- mclapply(seq_len(N_SPLITS), run_one_split,
                          m_tpm = m_tpm, m_cnt = m_cnt, cname = cname, stage = stage,
                          n_tox = n_tox, n_cnt = n_cnt, m_tpm_shared = m_tpm_shared,
+                         m_norm = m_norm,
                          mc.cores = N_CORES, mc.preschedule = TRUE, mc.silent = TRUE)
     ok <- vapply(res_list, is.list, logical(1))        # drop any worker that errored out
     for (r in res_list[ok]) { rows <- c(rows, r$rows); pval_pool <- c(pval_pool, r$pvals) }
 
-    cat(sprintf("    %-10s  n(tox)=%d n(cnt)=%d  [%d/%d runs OK]\n",
-                stage, n_tox, n_cnt, sum(ok), N_SPLITS))
+    cat(sprintf("    %-10s  n(tox)=%d n(cnt)=%d%s  [%d/%d runs OK]\n",
+                stage, n_tox, n_cnt,
+                if (is.null(m_norm)) "" else sprintf(" norm(n=%d g=%d)",
+                                                     nrow(m_norm$tpm), ncol(m_norm$tpm)),
+                sum(ok), N_SPLITS))
   }
 }
 
@@ -563,7 +710,7 @@ cat("ks_D / ad_A2 / cvm_W2 = distance of the p-values to Uniform(0,1) (KS / Ande
 cat("  Cramer-von Mises), averaged over runs; 0 = perfectly uniform. See QQ-plots in plots/.\n")
 cat("n_per_group = replicates per fake group for that arm (full half + fixed subsamples).\n")
 cat("k_config = TOX kNN neighbourhood config (k_start _ k_max, step 1); NA for edgeR/limma.\n")
-cat("Cohorts include the 4 cancer stages AND healthy (matched normals), across all 8 cancers.\n")
+cat("Cohorts include the 4 cancer stages AND healthy (matched normals), across CALIB_CANCERS.\n")
 cat(paste(rep("=", 116), collapse = ""), "\n", sep = "")
 print(summ[order(summ$cancer, summ$stage, summ$n_per_group, summ$k_config, summ$method), ], row.names = FALSE)
 
@@ -585,6 +732,43 @@ ov <- summ %>% group_by(method) %>%
             worst_FPR_0.05 = round(max(FPR_0.05, na.rm = TRUE), 4),
             worst_hits_FDR05 = round(max(hits_FDR05), 4), .groups = "drop") %>% as.data.frame()
 print(ov[order(ov$method), ], row.names = FALSE)
+
+# --- NORMALISATION COMPARISON: counts vs TPM, everything else held fixed ---------
+# The four NORM-* arms differ ONLY in the input scale and whether the composition
+# shift was centred out; same samples, same genes, same split, same kNN config. Read
+# them against each other, not against the main table.
+norm_summ <- summ[grepl("^NORM-", summ$method), ]
+if (nrow(norm_summ)) {
+  cat("\n", paste(rep("=", 116), collapse = ""), "\n", sep = "")
+  cat("NORMALISATION COMPARISON -- TOX-log on TPM vs TMM-CPM vs median-of-ratios counts\n")
+  cat("  NORM-TPM          raw TPM, no composition correction (the assumption Delta = 0)\n")
+  cat("  NORM-TPM-centred  raw TPM, per-gene MEDIAN of beta subtracted (median centring of log-ratios)\n")
+  cat("  NORM-TMM          counts normalised with edgeR TMM factors -> CPM\n")
+  cat("  NORM-MoR          counts normalised with DESeq2 median-of-ratios size factors\n")
+  cat("Under H0 all four should be calibrated; the question is which is CLOSEST to uniform.\n")
+  cat("A composition shift inflates FPR via Delta/sigma, so if TPM is materially worse than\n")
+  cat("the count arms, that is the shift showing up -- and NORM-TPM-centred says whether\n")
+  cat("median centring recovers it without leaving TPM.\n")
+  cat(paste(rep("=", 116), collapse = ""), "\n", sep = "")
+  print(norm_summ[order(norm_summ$cancer, norm_summ$stage, norm_summ$method),
+                  c("method", "cancer", "stage", "n_samples", "n_per_group", "n_genes",
+                    "FPR_0.05", "FPR_0.05_sd", "FPR_0.01", "median_p", "hits_FDR05",
+                    "ks_D", "ad_A2", "inflation_0.05", "verdict")],
+        row.names = FALSE)
+
+  cat("\n--- normalisation arms: median across the (cancer x stage) cells ---\n")
+  nov <- norm_summ %>% group_by(method) %>%
+    summarise(cells = dplyr::n(),
+              FPR_0.05 = round(median(FPR_0.05, na.rm = TRUE), 4),
+              FPR_0.01 = round(median(FPR_0.01, na.rm = TRUE), 4),
+              ks_D     = round(median(ks_D,  na.rm = TRUE), 4),
+              ad_A2    = round(median(ad_A2, na.rm = TRUE), 4),
+              hits_FDR05 = round(median(hits_FDR05), 4),
+              worst_FPR_0.05 = round(max(FPR_0.05, na.rm = TRUE), 4), .groups = "drop") %>%
+    as.data.frame()
+  print(nov[order(nov$ks_D), ], row.names = FALSE)
+  cat("(sorted by ks_D: smallest = closest to Uniform(0,1) = best calibrated)\n")
+}
 
 # ==================== plots ====================
 pval_pool <- Filter(Negate(is.null), pval_pool)          # make_pval returns NULL for empty runs

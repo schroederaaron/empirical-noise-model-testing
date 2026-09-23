@@ -63,7 +63,7 @@
 #                              hypothesis (2) from (1)/(3): if z_own is calibrated
 #                              and z_pool is not, the observed distances are fine
 #                              and the neighbourhood is at fault
-#   Part 4  parameter response tau sweep + kNN sweep + trim sweep, with the share
+#   Part 4  parameter response tau sweep + kNN sweep, with the share
 #                              of genes whose pool actually STOPPED on tau. If tau
 #                              almost never binds, "tau too low" is excluded
 #                              directly rather than by inference
@@ -79,7 +79,8 @@
 #       not the neighbourhood, and this whole hypothesis is wrong.
 #   P4  frac_stop_tau is small at tau = 0.1. Lowering tau shrinks pools and does
 #       NOT fix the inflation; raising it does not either.
-#   P5  Tail trimming makes alpha = 0.05 WORSE, not better. It removes the pool's
+#   P5  [CONFIRMED -- and the knob has since been REMOVED from the model entirely,
+#       so this sweep no longer runs.] Tail trimming makes alpha = 0.05 WORSE, not better. It removes the pool's
 #       tails, which narrows the core further -- it treats the symptom that is
 #       already conservative and worsens the one that is not. (This is the open
 #       ToDo "check whether a [5,95] percentile cap improves the raw model": the
@@ -129,7 +130,6 @@ TAU_GRID     <- c(0.02, 0.05, 0.10, 0.25, 1.00)   # 1.00 == effectively never st
 K_GRID_DIAG  <- list(list(k_start = 8L,  k_step = 1L, k_max = 30L, name = "k8_30"),
                      list(k_start = 20L, k_step = 1L, k_max = 50L, name = "k20_50"),
                      list(k_start = 40L, k_step = 1L, k_max = 120L, name = "k40_120"))
-TRIM_GRID    <- c(0.00, 0.02, 0.05)
 MAX_POOL     <- 70000L
 N_CORES      <- max(1L, min(16L, parallel::detectCores() - 1L))
 set.seed(42)
@@ -212,10 +212,10 @@ if (!gate_ok) warning("R port did NOT reproduce the Fortran exactly -- every res
 
 # ==================== Parts 1-3: per-gene diagnostics ====================
 
-diag_one <- function(m, norm, n_per, kcfg = K_CFG, tau = 0.1, trim = 0.0) {
+diag_one <- function(m, norm, n_per, kcfg = K_CFG, tau = 0.1) {
   sp <- pick_split(nrow(m), n_per); if (is.null(sp)) return(NULL)
   tox_diagnose(m[sp$a, , drop = FALSE], m[sp$b, , drop = FALSE], norm,
-               kcfg$k_start, kcfg$k_step, kcfg$k_max, tau, trim, MAX_POOL, verbose = FALSE)
+               kcfg$k_start, kcfg$k_step, kcfg$k_max, tau, MAX_POOL, verbose = FALSE)
 }
 
 cat("\n=== Parts 1-3: per-gene pool diagnostics ===\n")
@@ -339,7 +339,7 @@ print(p3, row.names = FALSE)
 write.csv(p3, file.path(OUT_DIR, "part3_own_vs_pool.csv"), row.names = FALSE)
 
 # ==================== Part 4: parameter response ====================
-# tau, k and trim, on the SAME splits, so differences are attributable to the
+# tau and k, on the SAME splits, so differences are attributable to the
 # parameter and not to the partition. `frac_stop_tau` says how often the tau rule
 # is the thing that ends pool growth: if it is near zero at tau = 0.1, then tau is
 # not binding and cannot be the cause, whatever the calibration does.
@@ -353,14 +353,11 @@ for (cname in names(DIAG_CANCERS)[1]) {          # one cancer is enough for a re
     for (n_per in N_PER_GROUP) {
       if (nrow(m) < 2L * n_per) next
       grid <- c(
-        lapply(TAU_GRID,   function(t) list(kind = "tau",  tau = t,   kcfg = K_CFG, trim = 0.0, lab = sprintf("tau=%.2f", t))),
-        lapply(K_GRID_DIAG,function(k) list(kind = "k",    tau = 0.1, kcfg = k,     trim = 0.0, lab = k$name)),
-        lapply(TRIM_GRID,  function(f) list(kind = "trim", tau = 0.1, kcfg = K_CFG, trim = f,   lab = sprintf("trim=%.2f", f))))
+        lapply(TAU_GRID,   function(t) list(kind = "tau",  tau = t,   kcfg = K_CFG, lab = sprintf("tau=%.2f", t))),
+        lapply(K_GRID_DIAG,function(k) list(kind = "k",    tau = 0.1, kcfg = k,     lab = k$name)))
       for (norm in c(0L, 1L)) for (cfg in grid) {
-        # trim is raw-only in the Fortran; mirror that gating here
-        if (norm == 1L && cfg$trim > 0) next
         d <- do.call(rbind, parallel::mclapply(seq_len(max(3L, N_SPLITS %/% 2L)), function(s) {
-          diag_one(m, norm, n_per, cfg$kcfg, cfg$tau, cfg$trim)
+          diag_one(m, norm, n_per, cfg$kcfg, cfg$tau)
         }, mc.cores = N_CORES))
         if (is.null(d) || !nrow(d)) next
         sweep_rows[[length(sweep_rows) + 1L]] <- data.frame(

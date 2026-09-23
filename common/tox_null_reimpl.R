@@ -24,7 +24,6 @@
 #                                  Frechet-mean centring in log2 space
 #   find_closest_helper / choose_index / gather_residuals_helper
 #                               -- adaptive kNN pool growth in GENE units
-#   trim_pool_tails_helper      -- symmetric quantile trim (raw only)
 #   1/sqrt(n_rep) scaling       -- individual-residual -> mean-difference scale
 #   compute_pvalue_helper       -- exact pairwise tail count, add-one corrected
 #
@@ -170,15 +169,6 @@ tox_gather <- function(target_mean, sorted, k_start, k_step, k_max, tau,
        genes = genes, stop_reason = stop_reason, n_rounds = n_rounds)
 }
 
-#' Symmetric quantile trim of a residual pool (mirrors trim_pool_tails_helper).
-tox_trim <- function(pool, trim_frac) {
-  if (!length(pool) || trim_frac <= 0) return(pool)
-  k <- floor(length(pool) * trim_frac)
-  if (k < 1L || (length(pool) - 2L * k) < 1L) return(pool)
-  s <- sort(pool)
-  s[(k + 1L):(length(pool) - k)]
-}
-
 # ------------------------------------------------------------------ p-value
 
 #' Exact add-one-corrected pairwise tail p-value (mirrors compute_pvalue_helper).
@@ -236,7 +226,7 @@ tox_pvalue_exact <- function(pool_case, pool_ctrl, obs) {
 #' @param genes optional subset (indices or names) to instrument, for speed.
 tox_diagnose <- function(case_mat, ctrl_mat, norm_method,
                          k_start = 20L, k_step = 1L, k_max = 50L, tau = 0.1,
-                         trim_frac = 0.0, max_pool_size = 70000L,
+                         max_pool_size = 70000L,
                          obs = NULL, genes = NULL, verbose = TRUE) {
   stopifnot(ncol(case_mat) == ncol(ctrl_mat))
   ng <- ncol(case_mat)
@@ -270,7 +260,7 @@ tox_diagnose <- function(case_mat, ctrl_mat, norm_method,
     if (verbose && ii %% 2000L == 0L) message("  ... gene ", ii, "/", length(idx))
     gc_ <- tox_gather(mc[g], sc, k_start, k_step, k_max, tau, max_pool_size)
     gt_ <- tox_gather(mt[g], st, k_start, k_step, k_max, tau, max_pool_size)
-    pc <- tox_trim(gc_$pool, trim_frac); pt <- tox_trim(gt_$pool, trim_frac)
+    pc <- gc_$pool; pt <- gt_$pool
     if (length(pc) < 10L || length(pt) < 10L) next
 
     own_c <- sc$resid[, slot_c[g]]      # already Bessel-corrected
@@ -332,7 +322,7 @@ tox_diagnose <- function(case_mat, ctrl_mat, norm_method,
 #' floating-point noise.
 validate_against_fortran <- function(case_mat, ctrl_mat, norm_method,
                                      k_start = 20L, k_step = 1L, k_max = 50L,
-                                     tau = 0.1, trim_frac = 0.0,
+                                     tau = 0.1,
                                      max_pool_size = 70000L, n_genes_check = 500L) {
   if (!exists("tox_compute_noise_pvalues_pipeline_exact"))
     stop("Load rcpp/tensoromics_functions.R first.")
@@ -344,12 +334,12 @@ validate_against_fortran <- function(case_mat, ctrl_mat, norm_method,
     control_means = as.numeric(colMeans(ctrl_mat)), control_replicates = ctrl_mat,
     obs_own = obs, valid_genes_own = valid, norm_method = as.integer(norm_method),
     k_start = k_start, k_step = k_step, k_max = k_max, tau = tau,
-    trim_frac = trim_frac, max_pool_size = max_pool_size)
+    max_pool_size = max_pool_size)
   pf <- fres$pvalues_own; pf[pf < 0 | pf > 1] <- NA
 
   sel <- sort(sample.int(ncol(case_mat), min(n_genes_check, ncol(case_mat))))
   d <- tox_diagnose(case_mat, ctrl_mat, norm_method, k_start, k_step, k_max, tau,
-                    trim_frac, max_pool_size, obs = obs, genes = sel, verbose = FALSE)
+                    max_pool_size, obs = obs, genes = sel, verbose = FALSE)
   pr <- setNames(d$p, d$gene_id)
   gid <- colnames(case_mat); if (is.null(gid)) gid <- paste0("g", seq_len(ncol(case_mat)))
   common <- intersect(names(pr)[!is.na(pr)], gid[sel][!is.na(pf[sel])])

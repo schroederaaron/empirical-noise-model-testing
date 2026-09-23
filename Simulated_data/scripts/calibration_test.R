@@ -162,12 +162,7 @@ CFG <- list(
     list(name = "k40_70", k_start = 40L, k_step = 5L, k_max = 70L)
   ),
   tox_tau      = 0.1,
-  tox_max_pool = 5000L,
-
-  # Residual-pool tail trim (raw norm only). When > 0, each raw (norm 0) arm is
-  # ALSO run with this per-tail trim fraction as a separate "_trim" arm, so the
-  # trimmed-vs-untrimmed raw comparison appears in the same sweep. 0 disables it.
-  tox_trim_frac = 0.05
+  tox_max_pool = 5000L
 )
 
 dir.create(CFG$out_dir, showWarnings = FALSE, recursive = TRUE)
@@ -341,7 +336,7 @@ run_deseq2 <- function(counts, group) {
 #'
 #' @param kcfg list(name, k_start, k_step, k_max) from CFG$tox_k_grid
 run_tox <- function(tpm, group, norm_method = 1L, variant = "exact",
-                    kcfg = CFG$tox_k_grid[[1]], trim_frac = 0.05) {
+                    kcfg = CFG$tox_k_grid[[1]]) {
   n_genes <- nrow(tpm)
 
   # Replicate matrices are SAMPLES x GENES and PRE-LOG (linear TPM) for BOTH
@@ -382,7 +377,6 @@ run_tox <- function(tpm, group, norm_method = 1L, variant = "exact",
     norm_method        = as.integer(norm_method),
     k_start = kcfg$k_start, k_step = kcfg$k_step,
     k_max   = kcfg$k_max,   tau    = CFG$tox_tau,
-    trim_frac = trim_frac,
     max_pool_size = CFG$tox_max_pool)
 
   # Fail loudly: a non-zero ierr alongside a silently returned p-vector would
@@ -451,10 +445,6 @@ run_all_methods <- function(sim) {
     for (v in CFG$tox_variants) for (nm in CFG$tox_norm) for (kg in CFG$tox_k_grid) {
       safe(sprintf("TOX_%s_n%d_%s", v, nm, kg$name),
            run_tox(tpm, grp, nm, v, kg))
-      # Raw-only tail-trim companion arm (trim is a no-op under log norm).
-      if (nm == 0L && CFG$tox_trim_frac > 0)
-        safe(sprintf("TOX_%s_n%d_%s_trim", v, nm, kg$name),
-             run_tox(tpm, grp, nm, v, kg, CFG$tox_trim_frac))
     }
 
   list(results = out, keep = keep, is_de = sim$is_de[keep])
@@ -786,13 +776,8 @@ report <- function(A, B) {
 # =============================================================================
 if (sys.nframe() == 0L) {
   message("TOX enabled: ", CFG$run_tox)
-  n_arms <- 3 + if (CFG$run_tox) {
-    base <- length(CFG$tox_variants) * length(CFG$tox_norm) * length(CFG$tox_k_grid)
-    # raw-only "_trim" companion arms (one extra per variant x k_grid x raw norm)
-    trim <- if (CFG$tox_trim_frac > 0)
-      length(CFG$tox_variants) * sum(CFG$tox_norm == 0L) * length(CFG$tox_k_grid) else 0
-    base + trim
-  } else 0
+  n_arms <- 3 + if (CFG$run_tox)
+    length(CFG$tox_variants) * length(CFG$tox_norm) * length(CFG$tox_k_grid) else 0
   message(sprintf("Arms per dataset: %d  |  datasets: %d (A) + %d (B)",
                   n_arms,
                   length(CFG$dists) * length(CFG$n_reps) *

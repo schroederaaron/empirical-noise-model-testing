@@ -52,7 +52,6 @@ Resolution (the p-value floor) therefore depends on the arm:
 | bootstrap, pooled (or blocked above the cap) | `1 / (N_BOOTSTRAP_DRAWS + 1)` |
 | bootstrap, blocked & enumerated | `1 / (W_case * W_control + 1)`, `W = (n_pool / n_rep) * n_rep**n_rep` |
 
-**Caveat:** `trim_frac` is **ignored** under `null_method = 1` — trimming sorts the pool in place, which destroys the per-gene block layout the blocked null reads, so the alloc layer forces it to 0. Trim + blocked is not a valid combination.
 
 **RNG:** `random_number` is now called once per **chunk** of draws (a single array fill sized by `RNG_BUFFER_MAX`, allocated once and reused per gene) instead of once per draw — typically one RNG call per gene instead of `N_BOOTSTRAP_DRAWS`. The pooled arm is bit-for-bit unchanged by this (verified: `max |p_old - p_new| = 0`); the enumerated blocked path uses no RNG at all.
 
@@ -87,14 +86,6 @@ The layer lived, per side (case and control), between `gather_residuals_helper` 
   - `select_stratum_for_target_helper` — given the accepted binning, copy out just the residuals in the bin containing the target gene's own mean.
 - **Per-gene flow.** Stratify the case pool → select the target's stratum; same for control; then the p-value ran on the selected strata (bootstrap draws in the baseline model; sqrt-scale + exact tail count in the exact model), gated on each stratum having ≥ 10 residuals.
 - **ABI diagnostic.** Two outputs, `chosen_n_bins_own_case` / `chosen_n_bins_own_control`, carried the chosen bin count per side **sign-encoded**: magnitude = bin count, sign = criteria met (+) vs coarse fallback (−), `-1` = not computed. These were surfaced through the Rcpp entry (`chosen_n_bins_own_case/control` list elements) and consumed by the R comparison/calibration scripts. They were removed with the layer.
-
-## Residual-pool tail trimming (raw normalization)
-
-A lighter-weight successor to stratification for the raw-normalization variance problem. Instead of trying to *partition* the neighborhood by variance (which the section above shows cannot work, because the mean-neighborhood is already mean-homogeneous), we simply **trim the tails of the pooled residuals**: after the kNN pool is gathered, sort it and drop the lower and upper `trim_frac` (default 5%) by value, keeping the central `1 − 2·trim_frac`. The null is then built from the trimmed pool exactly as before.
-
-**The theory.** In raw/linear space the mean-variance trend is strong and heavy tails are common, so even a mean-homogeneous neighborhood can contain a handful of extreme residuals that widen (or, via a lone huge value, distort) the empirical null. If the pool *has* such artificial outliers, trimming removes them and tightens the null to the bulk of the noise; if it *doesn't*, the residuals are already a homogeneous spread, so the trimmed values sit close to the rest and almost nothing is lost. Either way the trimmed null is a more faithful estimate of typical noise. Under **log** normalization the mean-variance relationship is already stabilized and the tails are light, so trimming buys nothing there — it is therefore gated to raw only (`norm_method == 0`; the pipeline passes `trim_frac = 0` under log).
-
-**How it is implemented.** A single shared helper `trim_pool_tails_helper(pool, n_pool, trim_frac)` in **both** `tox_noise_model.F90` and `tox_noise_model_exact.F90` (kept in sync). It is called on each side's pool immediately after `gather_residuals_helper` — before the `< 10`-residual gate and, in the exact model, before the sqrt-scaling — so both models score the trimmed central residuals. It sorts the pool (indirect `sort_real`) and keeps the central `n_pool − 2k` residuals, where `k = floor(n_pool · trim_frac)`. It no-ops when `trim_frac ≤ 0`, when `k` rounds to 0 (pool smaller than `1/trim_frac`, so low-`n_rep` pools are untouched), or when trimming would empty the pool (`trim_frac ≥ 0.5`); the reported `neighborhood_size_*` is the post-trim count. Unlike stratification this needs **no** `gene_id_per_residual` plumbing and **no** ABI diagnostics — just one real parameter, `trim_frac`, threaded after `tau` through the C entry, the Rcpp dispatcher, and the R wrappers (default `0.0`). Both calibration scripts expose it as an A/B arm (`null_calibration.R` → `TOX-raw-trim05`; `calibration_test.R` → a `_trim` companion for each raw arm), so trimmed-vs-untrimmed raw calibration appears in one sweep.
 
 ## Multidimensional (multi-axis) noise model — `noise_model_md`
 
@@ -173,7 +164,7 @@ subroutine compute_noise_pvalue_pipeline_md( &
     means_case, replicates_case_packed, n_rep_case_per_axis, &
     means_control, replicates_control_packed, n_rep_control_per_axis, &
     beta_obs, compute_pvalue_own, beta_mode, beta_centre, &
-    n_genes, n_axes, norm_method, k_start, k_step, k_max, tau, trim_frac, &
+    n_genes, n_axes, norm_method, k_start, k_step, k_max, tau, &
     null_method, sampling_mode, n_draws_max, n_exceed_target, enum_max_product, &
     seed, max_pool_size, &
     pvalues_own, d_obs, d_std_obs, d_sq_null_mean, method_used, n_draws_used, &
@@ -213,7 +204,7 @@ means(n_genes, n_axes)
 | `beta_check_cor`, `beta_check_mad` | `(n_axes)` | supplied vs recomputed `beta_hat`; exactly `1` / `0` in internal mode |
 | `delta_hat` | `(n_axes)` | estimated composition shift, reported even when centring is off |
 
-`norm_method`, `k_start`, `k_step`, `k_max`, `tau`, `trim_frac` and `max_pool_size` keep their current meaning, applied per axis. `trim_frac` is raw-normalization only, as in the scalar modules.
+`norm_method`, `k_start`, `k_step`, `k_max`, `tau` and `max_pool_size` keep their current meaning, applied per axis.
 
 **`null_method` is accepted only as 0.** Under this module's construction a draw takes one residual per side, and each neighbour gene contributes exactly `n_rep` residuals to the pool, so "pick a gene uniformly, then a residual within it" is the *same distribution* as "pick a residual uniformly from the pool". A gene-blocked argument would be a no-op that merely looked meaningful, so it is rejected with `ERR_INVALID_INPUT` rather than silently ignored — the same stance `noise_model_exact` takes.
 
