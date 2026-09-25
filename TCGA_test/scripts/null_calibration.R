@@ -315,6 +315,11 @@ load_counts_matrix <- function(project_id, stage) {
   obj <- readRDS(fn)
   if (!is.matrix(obj$expression_vectors)) return(NULL)
   m <- t(obj$expression_vectors)               # samples x genes -> genes x samples
+  # edgeR/limma/DESeq2 need genes x samples. If a counts file were stored the other way
+  # round, t() would hand them samples as "genes" and they would run on garbage.
+  if (nrow(m) < ncol(m))
+    stop(sprintf("load_counts_matrix(%s, %s): %d rows x %d cols after t() -- expected genes x samples",
+                 project_id, stage, nrow(m), ncol(m)))
   colnames(m) <- rownames(obj$expression_vectors)
   rownames(m) <- if (!is.null(obj$gene_ids)) obj$gene_ids else colnames(obj$expression_vectors)
   m
@@ -394,8 +399,18 @@ run_tox_once <- function(raw_mat, norm_method, sp, kcfg = K_GRID[[1]],
     obs_own = obs_own, valid_genes_own = valid,
     norm_method = norm_int, k_start = kcfg$k_start, k_step = kcfg$k_step, k_max = kcfg$k_max,
     tau = TAU, null_method = null_method, max_pool_size = MAX_POOL)
+  # A non-zero ierr (e.g. 203 = dimension mismatch) is a wiring error, not "no p-values".
+  # tox_or_empty() re-raises it, so the worker fails and shows up in "[k/N runs OK]"
+  # instead of the arm silently vanishing from the results.
+  if (!is.null(res$ierr) && res$ierr != 0L) stop(sprintf("TOX ierr = %d", res$ierr))
   p <- res$pvalues_own; p[p < 0 | p > 1] <- NA; p[!is.na(p)]
 }
+
+#' run_tox_once() inside the sweep: an ordinary failure yields no p-values (as before),
+#' a TOX ierr is re-raised.
+tox_or_empty <- function(expr)
+  tryCatch(expr, error = function(e)
+    if (startsWith(conditionMessage(e), "TOX ierr")) stop(e) else numeric(0))
 
 #' Build the three input scales for the normalisation comparison, matched.
 #'
@@ -531,8 +546,7 @@ run_one_split <- function(s, m_tpm, m_cnt, cname, stage, n_tox, n_cnt, m_tpm_sha
     for (arm in NORM_ARMS) {
       mat <- m_norm[[arm$input]]
       if (is.null(mat)) next
-      pv <- tryCatch(run_tox_once(mat, "log", spn, kcfg, "exact", 0L, arm$centre),
-                     error = function(e) numeric(0))
+      pv <- tox_or_empty(run_tox_once(mat, "log", spn, kcfg, "exact", 0L, arm$centre))
       if (length(pv)) {
         rws <- c(rws, list(make_row(arm$label, cname, stage, s, nrow(mat), spn$g,
                                     kcfg$name, pval_metrics(pv))))
@@ -551,10 +565,9 @@ run_one_split <- function(s, m_tpm, m_cnt, cname, stage, n_tox, n_cnt, m_tpm_sha
         if (isTRUE(arm$shared) && (is.null(m_tpm_shared) || !ncol(m_tpm_shared))) next
         mt_arm <- if (isTRUE(arm$shared)) m_tpm_shared else m_tpm
         for (kcfg in K_GRID) {
-          pv <- tryCatch(run_tox_once(mt_arm, arm$norm, sp, kcfg,
-                                      if (is.null(arm$model)) "exact" else arm$model,
-                                      if (is.null(arm$null)) 0L else arm$null),
-                         error = function(e) numeric(0))
+          pv <- tox_or_empty(run_tox_once(mt_arm, arm$norm, sp, kcfg,
+                                          if (is.null(arm$model)) "exact" else arm$model,
+                                          if (is.null(arm$null)) 0L else arm$null))
           if (length(pv)) {
             rws <- c(rws, list(make_row(arm$label, cname, stage, s, n_tox, sp$g, kcfg$name, pval_metrics(pv))))
             pvs <- c(pvs, list(make_pval(arm$label, cname, stage, sp$g, kcfg$name, pv)))

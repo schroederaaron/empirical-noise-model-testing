@@ -5,12 +5,14 @@
 # =============================================================================
 Simulated_data/results/*
 TCGA_test/results/*
+Distribution_GOF/results/*
 # ...but keep the (otherwise-empty) results/ folders in the repo so the
 # directory structure stays visible:
 !Simulated_data/results/.gitkeep
 !Simulated_data/results/calibration_test*.out
 !TCGA_test/results/.gitkeep
 !TCGA_test/results/null_calibration*.out
+!Distribution_GOF/results/.gitkeep
 
 # R session / run artifacts
 .Rhistory

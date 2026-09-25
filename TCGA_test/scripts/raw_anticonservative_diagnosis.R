@@ -203,7 +203,8 @@ for (nm in c(0L, 1L)) {
   if (is.null(m)) { cat("  cohort unavailable -- SKIPPING GATE (results are unvalidated)\n"); gate_ok <- FALSE; break }
   sp <- pick_split(nrow(m), 20L)
   v <- validate_against_fortran(m[sp$a, , drop = FALSE], m[sp$b, , drop = FALSE], nm,
-                                K_CFG$k_start, K_CFG$k_step, K_CFG$k_max, 0.1, 0.0, MAX_POOL)
+                                K_CFG$k_start, K_CFG$k_step, K_CFG$k_max, 0.1,
+                                max_pool_size = MAX_POOL)
   cat(sprintf("  norm=%d  n=%d genes  max|dp|=%.3g  max|d nbhd|=%d  ok=%s\n",
               nm, v$n_compared, v$max_abs_diff, v$max_abs_diff_nbhd, v$ok))
   if (!isTRUE(v$ok)) gate_ok <- FALSE

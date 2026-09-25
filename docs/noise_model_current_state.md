@@ -87,6 +87,10 @@ The layer lived, per side (case and control), between `gather_residuals_helper` 
 - **Per-gene flow.** Stratify the case pool → select the target's stratum; same for control; then the p-value ran on the selected strata (bootstrap draws in the baseline model; sqrt-scale + exact tail count in the exact model), gated on each stratum having ≥ 10 residuals.
 - **ABI diagnostic.** Two outputs, `chosen_n_bins_own_case` / `chosen_n_bins_own_control`, carried the chosen bin count per side **sign-encoded**: magnitude = bin count, sign = criteria met (+) vs coarse fallback (−), `-1` = not computed. These were surfaced through the Rcpp entry (`chosen_n_bins_own_case/control` list elements) and consumed by the R comparison/calibration scripts. They were removed with the layer.
 
+## Input dimension check (both scalar modules)
+
+Both `compute_noise_pvalue_pipeline` entry points index the case means, the control means, the replicate matrices and the observed statistic with **one** gene index, so all of them must describe the same genes: `n_genes_case == n_genes_control == n_genes`. Otherwise the pipeline returns `ierr = ERR_DIM_MISMATCH` (203) before computing anything. The typical cause is a replicate matrix handed over genes × samples (the edgeR/DESeq2 convention) instead of samples × genes, which swaps the gene and replicate counts; without the check such a call ran to completion and scored the wrong matrix. On the R side, `null_calibration.R` treats any non-zero `ierr` as a hard error of that run (it shows up in "[k/N runs OK]") instead of an arm that silently yields no p-values.
+
 ## Multidimensional (multi-axis) noise model — `noise_model_md`
 
 A third module, `src/tox/tox_noise_model_md.F90` (`module noise_model_md`), generalises the model from a single case/control contrast to `d` **independent axes** (tissues, stages, conditions). A gene is **one vector**; the axes are not tested individually inside this test. It is separate from the two scalar modules because the ABI carries an extra dimension on almost every array.

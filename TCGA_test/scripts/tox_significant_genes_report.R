@@ -146,7 +146,8 @@ cat("\n=== Fidelity check: R port vs Fortran ===\n")
     if (is.null(colnames(cm)) && !is.null(c0$gene_ids)) colnames(cm) <- c0$gene_ids
     cm <- cm[, intersect(d0$kept_gene_ids, colnames(cm)), drop = FALSE]
     hm <- d0$healthy_replicates_raw[, colnames(cm), drop = FALSE]
-    v <- validate_against_fortran(cm, hm, NORM_INT, K_START, K_STEP, K_MAX, TAU, 0.0, MAX_POOL)
+    v <- validate_against_fortran(cm, hm, NORM_INT, K_START, K_STEP, K_MAX, TAU,
+                                  max_pool_size = MAX_POOL)
     cat(sprintf("  compared %d genes | max|dp| = %.3g | max|d nbhd| = %d | ok = %s\n",
                 v$n_compared, v$max_abs_diff, v$max_abs_diff_nbhd, v$ok))
     if (!isTRUE(v$ok))
@@ -222,8 +223,8 @@ for (k in keys) {
     if (!length(sel)) next
 
     # --- enrichment: pool / neighbourhood statistics for the survivors only ---
-    dg <- tryCatch(tox_diagnose(cm, hm, NORM_INT, K_START, K_STEP, K_MAX, TAU, 0.0,
-                                MAX_POOL, genes = common[sel], verbose = FALSE),
+    dg <- tryCatch(tox_diagnose(cm, hm, NORM_INT, K_START, K_STEP, K_MAX, TAU,
+                                max_pool_size = MAX_POOL, genes = common[sel], verbose = FALSE),
                    error = function(e) NULL)
     dgi <- if (!is.null(dg)) match(common[sel], dg$gene_id) else rep(NA_integer_, length(sel))
 
