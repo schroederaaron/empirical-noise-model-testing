@@ -1,0 +1,23 @@
+# gof_env.conf -- the ONLY place the GOF wrappers take paths and limits from.
+# Lives in ~/.claude/bin/ (outside TCGA_TOX_TEST): Claude Code cannot edit it.
+# Fill in the values Claude Code reports in Phase 0 of TASK_yeast48_gof.md,
+# check them yourself, then save as ~/.claude/bin/gof_env.conf.
+
+ALLOWED_ROOT="/media/BioNAS2/TCGA_TOX_TEST"      # the only host path mounted into the container
+
+# Must lie inside ALLOWED_ROOT (the wrappers refuse to run otherwise):
+GOF_REPO="/media/BioNAS2/TCGA_TOX_TEST/empirical-noise-model-testing"   # clone that holds Distribution_GOF/
+WORK_DIR="/media/BioNAS2/TCGA_TOX_TEST/Tensor-Omics"                     # dir that holds external/docker_r_libs
+LOG_DIR="/media/BioNAS2/TCGA_TOX_TEST/empirical-noise-model-testing/Distribution_GOF/results/logs"
+
+RUNTIME="docker"                  # docker | apptainer
+RUNTIME_BIN="/usr/bin/docker"     # ABSOLUTE path to docker or apptainer
+IMAGE="arch-gfortran"             # docker image name, or absolute path to a .sif (apptainer)
+
+LOCAL_CPUS=4                      # cores for runs outside SLURM (tests, dry-runs, dataset build)
+
+SBATCH_BIN="/usr/bin/sbatch"      # ABSOLUTE path
+SLURM_PARTITION=""                # empty = cluster default
+SLURM_ACCOUNT=""                  # empty = none
+MAX_CPUS=32                       # upper limits gof_submit.sh accepts
+MAX_MEM_GB=128
