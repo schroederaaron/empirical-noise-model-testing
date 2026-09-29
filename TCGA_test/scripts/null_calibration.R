@@ -136,8 +136,22 @@ ensure_fonts <- function() {
 ensure_fonts()
 
 
-source("outlier_significance_analysis.R")   # loaders, preprocess_replicates, tox wrappers
-source("config.R")
+# ---- locate common/ (config.R, utils.R, ...) from THIS script's own location ----
+# Slurm runs the scripts from the Tensor-Omics root, where a plain source("config.R")
+# would pick up whatever copy sits in the working directory (e.g. a stale flat one).
+# So resolve common/ relative to the script file (<script>/../../common); the other
+# entries are fallbacks for interactive use, with a flat copy in "." last.
+if (!exists("COMMON_DIR")) COMMON_DIR <- local({
+  f <- sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE))
+  cand <- c(if (length(f)) file.path(dirname(normalizePath(f[1])), "..", "..", "common"),
+            "analysis/common", "experiments/Noise_Model_Test/common", "common", ".")
+  hit <- cand[file.exists(file.path(cand, "config.R"))]
+  if (!length(hit)) stop("common/ not found (need config.R); looked in: ", paste(cand, collapse = ", "))
+  normalizePath(hit[1])
+})
+
+source(file.path(COMMON_DIR, "outlier_significance_analysis.R"))   # loaders, preprocess_replicates, tox wrappers
+source(file.path(COMMON_DIR, "config.R"))
 suppressMessages({library(dplyr); library(ggplot2); library(data.table)})
 options(width = 200)
 
@@ -228,24 +242,35 @@ ANY_SHARED_ARM <- any(vapply(TOX_ARMS, function(a) isTRUE(a$shared), logical(1))
 # precise, roughly a 4-5x CV spread across 500 bp - 10 kb among genes the matcher
 # treats as equivalent.
 #
-# Kept deliberately small: 4 arms, ONE kNN config, the full half split only, and a
-# 3-cancer x 3-stage subset. Everything except the input scale is held fixed --
-# same samples, same genes, same split -- or the comparison confounds normalisation
-# with cohort differences.
+# Full grid: every input in NORM_ARMS x every TOX arm in NORM_TOX, ONE kNN config, a
+# 3-cancer x 3-stage subset. Everything except the input scale and the arm is held
+# fixed -- same samples, same genes, same split -- or the comparison confounds
+# normalisation with cohort differences. Label = "<TOX arm>|<input>".
+#
+# Raw counts (NORM-counts) carry the real TCGA library-size variation; a random
+# half-split balances it only on average, so this is where uncorrected counts are
+# expected to fail if they fail at all. Centring is a shift of the log-scale
+# statistic, so it is only run for the log arms.
 RUN_NORM_TEST <- TRUE
 NORM_STAGES   <- c("healthy", "Stage I", "Stage IV")   # a low and a high stage, plus the normals
-NORM_SIZES    <- c(0L)                                 # full half split only (0L); n-dependence
-                                                       # is already answered by the main sweep
+NORM_SIZES    <- c(0L, 3L, 5L)                         # full half split + the two sizes where the
+                                                       # blocked null is ENUMERATED (n_rep <= 5)
 NORM_ARMS <- list(
   list(input = "tpm", centre = 0L, label = "NORM-TPM"),
   list(input = "tpm", centre = 1L, label = "NORM-TPM-centred"),
+  list(input = "cnt", centre = 0L, label = "NORM-counts"),
+  list(input = "cnt", centre = 1L, label = "NORM-counts-centred"),
   list(input = "tmm", centre = 0L, label = "NORM-TMM"),
   list(input = "mor", centre = 0L, label = "NORM-MoR")
 )
-# All four are TOX-log in the `exact` engine with the pooled null -- only the input
-# scale and `centre` vary. NORM-TPM is therefore the same computation as the TOX-log
-# arm above (on the matched gene/sample subset), which makes it a built-in
-# consistency check on this whole block.
+NORM_TOX <- list(
+  list(norm = "log", model = "exact",     null = 0L, label = "TOX-log"),
+  list(norm = "log", model = "bootstrap", null = 1L, label = "TOX-log-blocked"),
+  list(norm = "raw", model = "exact",     null = 0L, label = "TOX-raw"),
+  list(norm = "raw", model = "bootstrap", null = 1L, label = "TOX-raw-blocked")
+)
+# "TOX-log|NORM-TPM" is the same computation as the TOX-log arm of the main sweep
+# (on the matched gene/sample subset) -- a built-in consistency check on this block.
 
 # Which methods to run.
 RUN_TOX    <- TRUE
@@ -271,7 +296,8 @@ ALPHAS           <- c(0.05, 0.01)
 # calibration depends on n. An arm needs 2 * size samples (size per fake group);
 # arms that don't fit the cohort are skipped. MIN_PER_GROUP guards the full arm
 # on small cohorts. Each output row carries `n_per_group` = the per-group count.
-SUBSAMPLE_SIZES  <- c(10L, 20L, 40L)     # per-group replicate counts to probe
+SUBSAMPLE_SIZES  <- c(3L, 5L, 10L, 20L, 40L)   # per-group replicate counts to probe; 3 and 5
+                                               # are where the blocked null is enumerated
 MIN_PER_GROUP    <- 3L                   # smallest usable group (full arm floor)
 
 # TOX kNN neighbourhood -- FIXED at the best config the 9-config sweep identified.
@@ -414,7 +440,7 @@ tox_or_empty <- function(expr)
 
 #' Build the three input scales for the normalisation comparison, matched.
 #'
-#' Returns `list(tpm =, tmm =, mor =)`, each samples x genes over the SAME samples
+#' Returns `list(tpm =, cnt =, tmm =, mor =)`, each samples x genes over the SAME samples
 #' and the SAME genes, or NULL when the cohort cannot supply them. Matching is the
 #' whole point: `m_tpm` and `m_cnt` arrive with different sample sets (different
 #' loaders) and different gene sets (TOX's keep mask vs the raw count rows), and the
@@ -461,7 +487,7 @@ build_norm_inputs <- function(m_tpm, m_cnt) {
     t(sweep(cnt, 2L, sf, "/"))          # cnt is genes x samples -> divide per SAMPLE
   }, error = function(e) { message("  build_norm_inputs: MoR failed -- ", conditionMessage(e)); NULL })
 
-  list(tpm = tpm, tmm = tmm, mor = mor)
+  list(tpm = tpm, cnt = t(cnt), tmm = tmm, mor = mor)   # all samples x genes
 }
 
 # ==================== reference methods (native counts) ====================
@@ -543,14 +569,16 @@ run_one_split <- function(s, m_tpm, m_cnt, cname, stage, n_tox, n_cnt, m_tpm_sha
     spn <- pick_split(nrow(m_norm$tpm), size)
     if (is.null(spn)) next
     kcfg <- K_GRID[[1]]
-    for (arm in NORM_ARMS) {
+    for (arm in NORM_ARMS) for (ta in NORM_TOX) {
+      if (arm$centre == 1L && ta$norm == "raw") next     # centring is log-scale only
       mat <- m_norm[[arm$input]]
       if (is.null(mat)) next
-      pv <- tox_or_empty(run_tox_once(mat, "log", spn, kcfg, "exact", 0L, arm$centre))
+      lab <- paste0(ta$label, "|", arm$label)
+      pv <- tox_or_empty(run_tox_once(mat, ta$norm, spn, kcfg, ta$model, ta$null, arm$centre))
       if (length(pv)) {
-        rws <- c(rws, list(make_row(arm$label, cname, stage, s, nrow(mat), spn$g,
+        rws <- c(rws, list(make_row(lab, cname, stage, s, nrow(mat), spn$g,
                                     kcfg$name, pval_metrics(pv))))
-        pvs <- c(pvs, list(make_pval(arm$label, cname, stage, spn$g, kcfg$name, pv)))
+        pvs <- c(pvs, list(make_pval(lab, cname, stage, spn$g, kcfg$name, pv)))
       }
     }
   }
@@ -747,18 +775,21 @@ ov <- summ %>% group_by(method) %>%
 print(ov[order(ov$method), ], row.names = FALSE)
 
 # --- NORMALISATION COMPARISON: counts vs TPM, everything else held fixed ---------
-# The four NORM-* arms differ ONLY in the input scale and whether the composition
-# shift was centred out; same samples, same genes, same split, same kNN config. Read
-# them against each other, not against the main table.
-norm_summ <- summ[grepl("^NORM-", summ$method), ]
+# The "<arm>|NORM-*" rows differ ONLY in the TOX arm, the input scale and whether the
+# composition shift was centred out; same samples, same genes, same split, same kNN
+# config. Read them against each other, not against the main table.
+is_norm_arm <- function(m) grepl("\\|NORM-", m)
+norm_summ <- summ[is_norm_arm(summ$method), ]
 if (nrow(norm_summ)) {
   cat("\n", paste(rep("=", 116), collapse = ""), "\n", sep = "")
-  cat("NORMALISATION COMPARISON -- TOX-log on TPM vs TMM-CPM vs median-of-ratios counts\n")
-  cat("  NORM-TPM          raw TPM, no composition correction (the assumption Delta = 0)\n")
-  cat("  NORM-TPM-centred  raw TPM, per-gene MEDIAN of beta subtracted (median centring of log-ratios)\n")
-  cat("  NORM-TMM          counts normalised with edgeR TMM factors -> CPM\n")
-  cat("  NORM-MoR          counts normalised with DESeq2 median-of-ratios size factors\n")
-  cat("Under H0 all four should be calibrated; the question is which is CLOSEST to uniform.\n")
+  cat("NORMALISATION COMPARISON -- every TOX arm in NORM_TOX on every input in NORM_ARMS\n")
+  cat("  NORM-TPM             raw TPM, no composition correction (the assumption Delta = 0)\n")
+  cat("  NORM-TPM-centred     raw TPM, per-gene MEDIAN of beta subtracted (median centring of log-ratios)\n")
+  cat("  NORM-counts          raw counts, no library-size or composition correction\n")
+  cat("  NORM-counts-centred  raw counts, median centring of log-ratios (log arms only)\n")
+  cat("  NORM-TMM             counts normalised with edgeR TMM factors -> CPM\n")
+  cat("  NORM-MoR             counts normalised with DESeq2 median-of-ratios size factors\n")
+  cat("Under H0 all inputs should be calibrated; the question is which is CLOSEST to uniform.\n")
   cat("A composition shift inflates FPR via Delta/sigma, so if TPM is materially worse than\n")
   cat("the count arms, that is the shift showing up -- and NORM-TPM-centred says whether\n")
   cat("median centring recovers it without leaving TPM.\n")
@@ -791,11 +822,39 @@ pv_all <- if (length(pval_pool)) as.data.frame(rbindlist(pval_pool)) else NULL
 # they show a single REFERENCE k config (plus the k-independent refs, k_config = NA). The
 # full k grid lives in the CSV, the kNN-sweep table above, and the dedicated kNN plot below.
 REF_K   <- if ("k20_50" %in% summ$k_config) "k20_50" else stats::na.omit(unique(summ$k_config))[1]
-summ_ref <- summ[is.na(summ$k_config) | summ$k_config == REF_K, ]
-pv_ref   <- if (!is.null(pv_all)) pv_all[is.na(pv_all$k_config) | pv_all$k_config == REF_K, ] else NULL
+# The normalisation-grid arms get their own plot (below); keep them out of the main ones.
+summ_ref <- summ[(is.na(summ$k_config) | summ$k_config == REF_K) & !is_norm_arm(summ$method), ]
+pv_ref   <- if (!is.null(pv_all)) pv_all[(is.na(pv_all$k_config) | pv_all$k_config == REF_K) &
+                                         !is_norm_arm(pv_all$method), ] else NULL
+ksw_ok   <- !is_norm_arm(summ$method)
+
+# NORMALISATION GRID PLOT: inflation at alpha 0.05 and 0.01 per input x TOX arm,
+# median across the (cancer x stage) cells, one column per replicate count.
+if (nrow(norm_summ)) {
+  ng <- norm_summ %>%
+    mutate(arm = sub("\\|.*$", "", method), input = sub("^.*\\|NORM-", "", method),
+           infl_0.01 = FPR_0.01 / 0.01) %>%
+    group_by(arm, input, n_per_group) %>%
+    summarise(i05 = median(inflation_0.05, na.rm = TRUE),
+              i01 = median(infl_0.01, na.rm = TRUE), .groups = "drop") %>% as.data.frame()
+  ng <- rbind(data.frame(ng[c("arm", "input", "n_per_group")], alpha = "alpha = 0.05", inflation = ng$i05),
+              data.frame(ng[c("arm", "input", "n_per_group")], alpha = "alpha = 0.01", inflation = ng$i01))
+  ng$input <- factor(ng$input, levels = sub("^NORM-", "", vapply(NORM_ARMS, `[[`, "", "label")))
+  p_norm <- ggplot(ng, aes(input, inflation, colour = arm, group = arm)) +
+    geom_hline(yintercept = 1, linetype = 2, colour = "grey40") +
+    geom_line() + geom_point(size = 1.8) +
+    facet_grid(alpha ~ n_per_group, labeller = labeller(n_per_group = label_both), scales = "free_y") +
+    labs(title = "Normalisation grid under H0: FPR / alpha by input and TOX arm (1 = calibrated)",
+         subtitle = "median over cancers x stages; n_per_group = full half split or fixed subsample",
+         x = NULL, y = "inflation", colour = NULL) +
+    theme_minimal(base_size = 9) + theme(axis.text.x = element_text(angle = 35, hjust = 1),
+                                         legend.position = "bottom")
+  tryCatch(ggsave(file.path(PLOT_DIR, "null_norm_grid.png"), p_norm, width = 12, height = 7, dpi = 140),
+           error = function(e) NULL)
+}
 
 # KNN-SWEEP PLOT: how neighbourhood size moves TOX calibration, per arm (TOX only) -----
-ksw_long <- summ[!is.na(summ$k_config), ]
+ksw_long <- summ[!is.na(summ$k_config) & ksw_ok, ]
 if (nrow(ksw_long)) {
   p_ksw <- ggplot(ksw_long, aes(k_config, ks_D, colour = factor(n_per_group), group = factor(n_per_group))) +
     stat_summary(fun = median, geom = "line") + stat_summary(fun = median, geom = "point") +

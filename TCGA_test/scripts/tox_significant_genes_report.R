@@ -83,13 +83,26 @@ if (!dir.create(LIB_DIR, recursive = TRUE, showWarnings = FALSE) && !dir.exists(
 .libPaths(c(LIB_DIR, .libPaths()))
 
 suppressMessages({library(dplyr); library(data.table)})
-source("outlier_significance_analysis.R")
-source("config.R")
+# ---- locate common/ (config.R, utils.R, ...) from THIS script's own location ----
+# Slurm runs the scripts from the Tensor-Omics root, where a plain source("config.R")
+# would pick up whatever copy sits in the working directory (e.g. a stale flat one).
+# So resolve common/ relative to the script file (<script>/../../common); the other
+# entries are fallbacks for interactive use, with a flat copy in "." last.
+if (!exists("COMMON_DIR")) COMMON_DIR <- local({
+  f <- sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE))
+  cand <- c(if (length(f)) file.path(dirname(normalizePath(f[1])), "..", "..", "common"),
+            "analysis/common", "experiments/Noise_Model_Test/common", "common", ".")
+  hit <- cand[file.exists(file.path(cand, "config.R"))]
+  if (!length(hit)) stop("common/ not found (need config.R); looked in: ", paste(cand, collapse = ", "))
+  normalizePath(hit[1])
+})
+
+source(file.path(COMMON_DIR, "outlier_significance_analysis.R"))
+source(file.path(COMMON_DIR, "config.R"))
 # tox_null_reimpl.R lives in common/; the repo's scripts are run from more than one
 # working directory, so look for it rather than assuming one.
 .source_reimpl <- function() {
-  cands <- c("tox_null_reimpl.R", "common/tox_null_reimpl.R", "../../common/tox_null_reimpl.R",
-             "../common/tox_null_reimpl.R", "../../../common/tox_null_reimpl.R")
+  cands <- c(file.path(COMMON_DIR, "tox_null_reimpl.R"), "tox_null_reimpl.R")
   for (p in cands) if (file.exists(p)) { source(p); return(invisible(p)) }
   stop("Could not locate tox_null_reimpl.R (looked in: ", paste(cands, collapse = ", "), ")")
 }

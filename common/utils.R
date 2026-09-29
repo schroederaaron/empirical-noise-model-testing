@@ -1,7 +1,9 @@
 # utils.R
 # Utility functions for Family & Gene Trajectory Analysis
 source("rcpp/tensoromics_functions.R")
-source("config.R")
+# Siblings are sourced from COMMON_DIR (set by the calling script); "." for a flat run.
+if (!exists("COMMON_DIR")) COMMON_DIR <- "."
+source(file.path(COMMON_DIR, "config.R"))
 
 # ==================== NORMALIZATION FUNCTIONS ====================
 

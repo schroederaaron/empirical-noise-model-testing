@@ -95,7 +95,7 @@ build_from_featurecounts <- function(file, samples, design, label) {
 #' Raw COUNTS (genes x samples) for a TCGA cancer stage OR the matched-normal cohort.
 #' Copied from TCGA_test/scripts/count_distribution.R (that script cannot be
 #' sourced: it runs its analysis on load). BASE_DATA_DIR comes from the repo's
-#' config.R, looked up in the working directory first, then in common/.
+#' config.R, looked up in common/ first, then in the working directory.
 load_counts_matrix <- function(project_id, stage) {
   fn <- if (identical(stage, "healthy"))
           file.path(BASE_DATA_DIR, project_id, paste0("healthy_", project_id, "_counts.rds"))
@@ -116,7 +116,7 @@ load_counts_matrix <- function(project_id, stage) {
 #' model (README states this).
 build_from_tcga <- function(project_id, stage, label) {
   if (!exists("BASE_DATA_DIR")) {
-    cand <- c("config.R", file.path(GOF_ROOT, "..", "common", "config.R"))
+    cand <- c(file.path(GOF_ROOT, "..", "common", "config.R"), "config.R")   # common/ first: a cwd copy may be stale
     cand <- cand[file.exists(cand)]
     if (!length(cand)) stop("config.R (BASE_DATA_DIR) not found in the working dir or common/")
     source(cand[1])

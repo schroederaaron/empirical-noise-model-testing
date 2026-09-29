@@ -11,8 +11,10 @@
 # library(data.table)
 # library(parallel)
 
-source("config.R")
-source("utils.R")
+# Siblings are sourced from COMMON_DIR (set by the calling script); "." for a flat run.
+if (!exists("COMMON_DIR")) COMMON_DIR <- "."
+source(file.path(COMMON_DIR, "config.R"))
+source(file.path(COMMON_DIR, "utils.R"))
 source("rcpp/tensoromics_functions.R")
 
 # Load Fortran shared library

@@ -55,7 +55,21 @@ if (!dir.create(LIB_DIR, recursive = TRUE, showWarnings = FALSE) && !dir.exists(
        " -- it must be on a WRITABLE, BIND-MOUNTED path or packages will not persist.")
 .libPaths(c(LIB_DIR, .libPaths()))
 
-source("config.R")
+# ---- locate common/ (config.R, utils.R, ...) from THIS script's own location ----
+# Slurm runs the scripts from the Tensor-Omics root, where a plain source("config.R")
+# would pick up whatever copy sits in the working directory (e.g. a stale flat one).
+# So resolve common/ relative to the script file (<script>/../../common); the other
+# entries are fallbacks for interactive use, with a flat copy in "." last.
+if (!exists("COMMON_DIR")) COMMON_DIR <- local({
+  f <- sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE))
+  cand <- c(if (length(f)) file.path(dirname(normalizePath(f[1])), "..", "..", "common"),
+            "analysis/common", "experiments/Noise_Model_Test/common", "common", ".")
+  hit <- cand[file.exists(file.path(cand, "config.R"))]
+  if (!length(hit)) stop("common/ not found (need config.R); looked in: ", paste(cand, collapse = ", "))
+  normalizePath(hit[1])
+})
+
+source(file.path(COMMON_DIR, "config.R"))
 
 # Name the package that is ACTUALLY missing from a load error. `library()` names
 # the package being loaded FIRST, e.g.

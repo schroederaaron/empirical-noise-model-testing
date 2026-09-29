@@ -27,7 +27,21 @@
 # so the ONLY difference is TPM's gene-length normalisation -- isolating the effect.
 # -----------------------------------------------------------------------------
 
-source("outlier_significance_analysis.R")   # loaders + compute_gene_keep_mask + globals
+# ---- locate common/ (config.R, utils.R, ...) from THIS script's own location ----
+# Slurm runs the scripts from the Tensor-Omics root, where a plain source("config.R")
+# would pick up whatever copy sits in the working directory (e.g. a stale flat one).
+# So resolve common/ relative to the script file (<script>/../../common); the other
+# entries are fallbacks for interactive use, with a flat copy in "." last.
+if (!exists("COMMON_DIR")) COMMON_DIR <- local({
+  f <- sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE))
+  cand <- c(if (length(f)) file.path(dirname(normalizePath(f[1])), "..", "..", "common"),
+            "analysis/common", "experiments/Noise_Model_Test/common", "common", ".")
+  hit <- cand[file.exists(file.path(cand, "config.R"))]
+  if (!length(hit)) stop("common/ not found (need config.R); looked in: ", paste(cand, collapse = ", "))
+  normalizePath(hit[1])
+})
+
+source(file.path(COMMON_DIR, "outlier_significance_analysis.R"))   # loaders + compute_gene_keep_mask + globals
 suppressMessages({library(dplyr); library(ggplot2); library(data.table)})
 options(width = 250)
 

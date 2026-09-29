@@ -3,16 +3,16 @@
 # =============================================================================
 # POWER BENCHMARK for TOX vs edgeR / limma-voom / DESeq2
 #
-#   Rscript power_test.R                 # all simulated parts
-#   POWER_PARTS=P,Q Rscript power_test.R # a subset
+#   Rscript power_test.R                 # all simulated parts (P,Q,C,N,V)
+#   POWER_PARTS=N,V Rscript power_test.R # a subset
 #   POWER_REAL_RDS=/path/cohort.rds POWER_PARTS=R Rscript power_test.R
 #
 # Companion of calibration_test.R (sourced for the simulator and the reference
 # methods; its main block is guarded by sys.nframe() and does not run). Design
-# rationale: claude/power_benchmark_design.md. Run from the Tensor-Omics root,
-# next to calibration_test.R and config.R (calibration_test.R resolves
-# source("config.R") and source("rcpp/tensoromics_functions.R") relative to the
-# working directory). Every TOX p-value comes from the compiled Fortran; there is
+# rationale: claude/power_benchmark_design.md. Run from the Tensor-Omics root (rcpp/ and
+# external/ are resolved relative to the working directory); calibration_test.R and
+# common/config.R are found relative to THIS script's location (COMMON_DIR below).
+# Every TOX p-value comes from the compiled Fortran; there is
 # no R re-implementation in the loop.
 #
 # WHAT THIS TESTS
@@ -41,6 +41,22 @@
 #     on TMM-CPM. Expected: uncorrected TPM loses FDR control as |Delta| grows;
 #     the question is by how much, and whether centring/TMM repair it.
 #
+#   Part N -- INPUT SCALE x CORRECTION, under realistic nuisance. Every TOX arm in
+#     PCFG$grid_arms on every input in PCFG$inputs: TPM, TPM median-centred, raw
+#     counts, counts median-centred, TMM-CPM, DESeq2 median-of-ratios. Crossed with
+#       depth       equal | random (lognormal sd 0.3) | confounded (group B 1.5x deeper)
+#       disp_model  const (phi = 0.2) | trend (phi = a + b/mu, scattered) |
+#                   gene (log phi_g ~ N(log 0.2, 0.7), independent of the mean)
+#     Absolute truth (as Part C), so composition is real and scored against beta.
+#     Answers: does TOX work on counts, what does each correction buy, which input.
+#     Centring is a shift of the log-scale statistic, so it is only run for log arms.
+#
+#   Part V -- VARIANCE-ONLY NULLS. 5% of null genes get their dispersion multiplied
+#     (hv_factor) in the case group only: no mean change, so every call on them is
+#     a false positive. fpr_hv05 measures how often a method calls them. This is
+#     the check on the het = 0.5 advantage in Part Q (a method that ignores a
+#     gene's own variance gains power there and pays for it here).
+#
 #   Part R -- REAL-DATA SIGNAL INJECTION (off unless POWER_REAL_RDS is set).
 #     Binomial thinning (Gerard 2020) on a real homogeneous cohort split into two
 #     fake groups: real correlation, real dispersion, real outliers, known truth.
@@ -50,7 +66,8 @@
 #     removes more is then scaled down by a common factor (uniroot) so both groups
 #     lose the same expected relative abundance -> Delta = 0 by design, nulls null
 #     in TPM. The realised Delta (median null log-ratio) is reported as a check;
-#     delta = NA marks a round where balancing was impossible.
+#     delta = NA marks a round where balancing was impossible. Runs the Part N input
+#     grid. The RDS is written by export_power_cohort.R.
 #
 # METRICS (per method, per simulated dataset; mean +/- SE over rounds)
 #   Threshold behaviour
@@ -58,6 +75,7 @@
 #     tpr_ach05                TPR at ACHIEVED FDR <= 0.05 -- method-fair power,
 #                              independent of whether the method's own alpha holds
 #     fpr_null05               fraction of true nulls called at nominal 0.05
+#     fpr_hv05                 (Part V) fraction of variance-only nulls called
 #     tpr_all_*                TPR with filtered-out true DE genes counted as missed
 #   Ranking (threshold-free); computed twice:
 #     *_p   ranked by p-value alone (ties stay tied -> trapezoid = mid-rank AUC)
@@ -92,6 +110,20 @@
 
 # ------------------------------------------------------------ dependencies
 
+# ---- locate common/ (config.R, utils.R, ...) from THIS script's own location ----
+# Slurm runs the scripts from the Tensor-Omics root, where a plain source("config.R")
+# would pick up whatever copy sits in the working directory (e.g. a stale flat one).
+# So resolve common/ relative to the script file (<script>/../../common); the other
+# entries are fallbacks for interactive use, with a flat copy in "." last.
+if (!exists("COMMON_DIR")) COMMON_DIR <- local({
+  f <- sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE))
+  cand <- c(if (length(f)) file.path(dirname(normalizePath(f[1])), "..", "..", "common"),
+            "analysis/common", "experiments/Noise_Model_Test/common", "common", ".")
+  hit <- cand[file.exists(file.path(cand, "config.R"))]
+  if (!length(hit)) stop("common/ not found (need config.R); looked in: ", paste(cand, collapse = ", "))
+  normalizePath(hit[1])
+})
+
 .find_file <- function(candidates) {
   hit <- candidates[file.exists(candidates)]
   if (!length(hit)) stop("None of these files found (run from the calibration_test.R ",
@@ -102,12 +134,13 @@
 # Simulator (make_truth / draw_counts / simulate_dataset), common_filter, the
 # edgeR / limma / DESeq2 runners, load_or_install, LIB_DIR, CFG$run_tox, and the
 # TOX wrappers. Its main block does not run when sourced.
-source(.find_file(c("calibration_test.R", "Simulated_data/scripts/calibration_test.R")))
+source(.find_file(c(file.path(COMMON_DIR, "..", "Simulated_data", "scripts", "calibration_test.R"),
+                     "calibration_test.R")))
 load_or_install("parallel")
 
 # ------------------------------------------------------------ configuration
 
-.env_parts <- Sys.getenv("POWER_PARTS", "P,Q,C")
+.env_parts <- Sys.getenv("POWER_PARTS", "P,Q,C,N,V")
 
 PCFG <- list(
   parts      = trimws(strsplit(.env_parts, ",")[[1]]),
@@ -137,8 +170,33 @@ PCFG <- list(
            pi1 = c(0.01, 0.05, 0.10, 0.30), het = c(1, 0.5)),
   C = list(dists = "lnpois", n_reps = 5L, pi1 = 0.10,
            frac_up = c(0.5, 0.7, 0.9, 1.0)),
+  N = list(dists = "lnpois", n_reps = c(3L, 5L, 10L), pi1 = 0.10, frac_up = 0.5,
+           depth = c("equal", "random", "confounded"),
+           disp_model = c("const", "trend", "gene")),
+  V = list(dists = "lnpois", n_reps = c(3L, 5L, 10L), pi1 = 0.10, het = c(1, 0.5),
+           hv_frac = 0.05),
   R = list(input_rds = Sys.getenv("POWER_REAL_RDS", ""), n_reps = c(3L, 5L, 10L),
            pi1 = 0.10, min_mean_count = 10),
+
+  # Nuisance models (Parts N, V). Defaults of the other parts are unchanged:
+  # equal depth, constant dispersion, no variance-only nulls.
+  depth_sd       = 0.3,           # "random": log library size ~ N(log lib_size, 0.3)
+  depth_confound = 1.5,           # "confounded": group B libraries this much deeper
+  disp_trend     = c(a = 0.02, b = 5), disp_scatter = 0.3,   # phi = (a + b/mu) * lognormal
+  disp_gene_sd   = 0.7,           # "gene": sd of log phi_g around log(disp)
+  hv_factor      = 4,             # Part V: case-group dispersion multiplier
+
+  # Parts N and R: input x arm grid. src: "tpm" | "cnt" | "tmm" | "mor".
+  inputs = list(
+    list(name = "TPM",            src = "tpm", centre = FALSE),
+    list(name = "TPM-centred",    src = "tpm", centre = TRUE),
+    list(name = "counts",         src = "cnt", centre = FALSE),
+    list(name = "counts-centred", src = "cnt", centre = TRUE),
+    list(name = "TMM",            src = "tmm", centre = FALSE),
+    list(name = "MoR",            src = "mor", centre = FALSE)
+  ),
+  # TOX-log-boot is left out: it matched TOX-log in every Part P cell.
+  grid_arms = c("TOX-log", "TOX-log-blocked", "TOX-raw", "TOX-raw-blocked"),
 
   run_edger  = TRUE,
   run_limma  = TRUE,
@@ -251,14 +309,38 @@ make_truth_power <- function(G, pi1, n_rep, het = 1, mode = c("relative", "absol
 }
 
 #' Counts and TPM from per-sample compositions. Mirrors simulate_dataset():
-#' fragments are drawn per gene with lambda_g = N * pi_g * L_g / sum(pi * L).
-simulate_power <- function(truth, dist, n_rep, lib_size = PCFG$lib_size, disp = PCFG$disp) {
+#' fragments are drawn per gene with lambda_gj = N_j * pi_gj * L_g / sum(pi * L).
+#'
+#' depth:      "equal" (N_j = lib_size), "random" (lognormal per sample),
+#'             "confounded" (group B = depth_confound x group A).
+#' disp_model: "const" (phi = disp for every gene), "trend" (phi = a + b/mu, with
+#'             lognormal scatter), "gene" (log phi_g ~ N(log disp, disp_gene_sd)).
+#' hv:         logical over genes; those get phi * hv_factor in group B only.
+#' The defaults draw NO extra random numbers, so Parts P/Q/C reproduce exactly.
+simulate_power <- function(truth, dist, n_rep, lib_size = PCFG$lib_size, disp = PCFG$disp,
+                           depth = "equal", disp_model = "const", hv = NULL) {
   G <- length(truth$pi_a)
   L <- sample(round(exp(rnorm(3e4, log(2000), 0.8))), G, replace = TRUE)
-  ec <- function(pi_mat) { p <- pi_mat * L; lib_size * sweep(p, 2, colSums(p), "/") }
+  lib <- switch(depth,
+    equal      = rep(lib_size, 2 * n_rep),
+    random     = lib_size * exp(rnorm(2 * n_rep, 0, PCFG$depth_sd)),
+    confounded = lib_size * rep(c(1, PCFG$depth_confound), each = n_rep),
+    stop("unknown depth: ", depth))
+  ec <- function(pi_mat, N) { p <- pi_mat * L; sweep(sweep(p, 2, colSums(p), "/"), 2, N, "*") }
+  lamA <- ec(matrix(truth$pi_a, G, n_rep), lib[seq_len(n_rep)])
+  lamB <- ec(truth$pi_B, lib[n_rep + seq_len(n_rep)])
 
-  cA <- draw_counts(ec(matrix(truth$pi_a, G, n_rep)), dist, disp)
-  cB <- draw_counts(ec(truth$pi_B), dist, disp)
+  phi <- switch(disp_model,
+    const = disp,
+    trend = (PCFG$disp_trend[["a"]] + PCFG$disp_trend[["b"]] / pmax(rowMeans(lamA), 1e-3)) *
+              exp(rnorm(G, 0, PCFG$disp_scatter)),
+    gene  = exp(rnorm(G, log(disp), PCFG$disp_gene_sd)),
+    stop("unknown disp_model: ", disp_model))
+  phiB <- if (is.null(hv)) phi else { p2 <- rep_len(phi, G); p2[hv] <- p2[hv] * PCFG$hv_factor; p2 }
+
+  # draw_counts takes a scalar or a per-gene vector (it recycles down the columns).
+  cA <- draw_counts(lamA, dist, phi)
+  cB <- draw_counts(lamB, dist, phiB)
   counts <- cbind(cA, cB)
   colnames(counts) <- c(paste0("A", seq_len(n_rep)), paste0("B", seq_len(n_rep)))
   rownames(counts) <- paste0("gene", seq_len(G))
@@ -268,6 +350,7 @@ simulate_power <- function(truth, dist, n_rep, lib_size = PCFG$lib_size, disp = 
   list(counts = counts, tpm = tpm, lengths = L,
        group = rep(c("A", "B"), each = n_rep),
        true_lfc = truth$true_lfc, is_de = truth$is_de,
+       is_hv = if (is.null(hv)) rep(FALSE, G) else hv,
        expr = log10(truth$pi_a * 1e6),          # strata by TRUE control abundance
        delta = truth$delta)
 }
@@ -372,6 +455,10 @@ group_lfc <- function(tpm, group)
 tmm_cpm <- function(counts)
   edgeR::cpm(normLibSizes(DGEList(counts = counts)), normalized.lib.sizes = TRUE, log = FALSE)
 
+#' DESeq2 median-of-ratios: counts (genes x samples) divided by per-sample size factors.
+mor_counts <- function(counts)
+  sweep(counts, 2L, DESeq2::estimateSizeFactorsForMatrix(counts), "/")
+
 #' TOX via the production Fortran. `mat` = genes x samples, LINEAR scale.
 #' `test_only` (row index): compute the p-value for that gene alone. The pool is
 #' still built from ALL rows of `mat` -- only the tested set shrinks.
@@ -384,7 +471,8 @@ run_tox_arm <- function(mat, group, arm, tie, test_only = NULL) {
          else colMeans(log2(pmax(case_rep, 0) + 1)) - colMeans(log2(pmax(ctrl_rep, 0) + 1))
   valid <- as.integer(is.finite(obs))
   if (!is.null(test_only)) valid[-test_only] <- 0L
-  if (arm$input == "tpm_centred") obs <- obs - median(obs[is.finite(obs)])
+  if (isTRUE(arm$centre) || identical(arm$input, "tpm_centred"))
+    obs <- obs - median(obs[is.finite(obs)])
   obs[!is.finite(obs)] <- 0
 
   fn <- if (arm$engine == "exact") tox_compute_noise_pvalues_pipeline_exact
@@ -423,7 +511,8 @@ run_tox_arm <- function(mat, group, arm, tie, test_only = NULL) {
 #' cost one prepare + gather pass each (n_de calls per dataset); cheap next to
 #' DESeq2, and exact for every engine and null_method.
 run_tox_oracle <- function(mat, group, arm, tie, is_null) {
-  if (arm$input == "tpm_centred") stop("oracle arm not defined for median-centred input")
+  if (isTRUE(arm$centre) || identical(arm$input, "tpm_centred"))
+    stop("oracle arm not defined for median-centred input")
   G <- nrow(mat); nul <- which(is_null)
   p <- fl <- rep(NA_real_, G)
   r0 <- run_tox_arm(mat[nul, , drop = FALSE], group, arm, tie[nul])
@@ -465,7 +554,19 @@ run_methods_power <- function(sim, part) {
   if (PCFG$run_limma)  safe("limma",  ref_tag(run_limma (counts, grp)))
   if (PCFG$run_deseq2) safe("DESeq2", ref_tag(run_deseq2(counts, grp)))
 
-  if (RUN_TOX) {
+  if (RUN_TOX && part %in% c("N", "R")) {
+    # Input x arm grid. Every input sees the SAME genes (common_filter) and samples.
+    mats <- list(tpm = tpm, cnt = counts, tmm = NULL, mor = NULL)
+    mats$tmm <- tryCatch(tmm_cpm(counts), error = function(e) NULL)
+    mats$mor <- tryCatch(mor_counts(counts), error = function(e) NULL)
+    for (a in PCFG$tox_arms) if (a$label %in% PCFG$grid_arms)
+      for (inp in PCFG$inputs) {
+        if (inp$centre && a$norm == 0L) next      # centring is a log-scale shift
+        mat <- mats[[inp$src]]; if (is.null(mat)) next
+        ai <- modifyList(a, list(input = inp$src, centre = inp$centre))
+        safe(paste0(a$label, "|", inp$name), run_tox_arm(mat, grp, ai, tie))
+      }
+  } else if (RUN_TOX) {
     arms <- if (part == "C") PCFG$tox_input_arms else PCFG$tox_arms
     tmm <- if (any(vapply(arms, function(a) a$input == "tmm", logical(1)))) tmm_cpm(counts)
     for (a in arms) {
@@ -536,7 +637,7 @@ score_pe <- function(p, tie) {
 }
 
 #' All scalar metrics for one method on one dataset.
-metrics_one <- function(res, is_de, true_lfc, n_de_total) {
+metrics_one <- function(res, is_de, true_lfc, n_de_total, is_hv = NULL) {
   p <- res$stat; padj <- res$padj
   tested <- !is.na(p)
   r_p  <- roc_steps(-p, is_de)
@@ -556,6 +657,9 @@ metrics_one <- function(res, is_de, true_lfc, n_de_total) {
   }
   called05 <- !is.na(padj) & padj < 0.05
   row$fpr_null05 <- sum(called05 & !is_de) / max(1, sum(!is_de))
+  row$fpr_hv05 <- if (any(is_hv)) mean(called05[is_hv]) else NA_real_
+  row$fpr_nonhv05 <- if (any(is_hv)) sum(called05 & !is_de & !is_hv) / max(1, sum(!is_de & !is_hv))
+                     else NA_real_
 
   k05 <- ach_step(r_p, 0.05)
   row$tpr_ach05     <- if (k05 > 0) r_p$tp[k05] / max(1, P) else 0
@@ -632,15 +736,16 @@ strata_one <- function(res, is_de, true_lfc, expr) {
 
 build_jobs <- function() {
   jb <- list()
-  add <- function(part, g, extra = list())
+  add <- function(part, g)
     for (d in g$dists %||% "real") for (n in g$n_reps) for (pi1 in g$pi1)
-      for (h in g$het %||% 1) for (fu in extra$frac_up %||% PCFG$frac_up)
-        for (i in seq_len(PCFG$n_rounds))
-          jb[[length(jb) + 1L]] <<- data.frame(part = part, dist = d, n_rep = n, pi1 = pi1,
-                                               het = h, frac_up = fu, round = i)
-  if ("P" %in% PCFG$parts) add("P", PCFG$P)
-  if ("Q" %in% PCFG$parts) add("Q", PCFG$Q)
-  if ("C" %in% PCFG$parts) add("C", PCFG$C, list(frac_up = PCFG$C$frac_up))
+      for (h in g$het %||% 1) for (fu in g$frac_up %||% PCFG$frac_up)
+        for (dp in g$depth %||% "equal") for (dm in g$disp_model %||% "const")
+          for (hvf in g$hv_frac %||% 0)
+            for (i in seq_len(PCFG$n_rounds))
+              jb[[length(jb) + 1L]] <<- data.frame(part = part, dist = d, n_rep = n, pi1 = pi1,
+                                                   het = h, frac_up = fu, depth = dp,
+                                                   disp_model = dm, hv_frac = hvf, round = i)
+  for (pt in c("P", "Q", "C", "N", "V")) if (pt %in% PCFG$parts) add(pt, PCFG[[pt]])
   if ("R" %in% PCFG$parts && nzchar(PCFG$R$input_rds)) add("R", PCFG$R)
   j <- do.call(rbind, jb); j$job_id <- seq_len(nrow(j)); j
 }
@@ -653,9 +758,14 @@ run_job <- function(job) {
   sim <- if (job$part == "R") {
     simulate_real(REAL_COHORT, job$n_rep, job$pi1)
   } else {
-    mode <- if (job$part == "C") "absolute" else "relative"
+    mode <- if (job$part %in% c("C", "N")) "absolute" else "relative"
     tr <- make_truth_power(PCFG$n_genes, job$pi1, job$n_rep, job$het, mode, job$frac_up)
-    simulate_power(tr, job$dist, job$n_rep)
+    hv <- if (job$hv_frac > 0) {
+      nul <- which(!tr$is_de)
+      seq_along(tr$is_de) %in% nul[sample.int(length(nul), round(job$hv_frac * length(nul)))]
+    }
+    simulate_power(tr, job$dist, job$n_rep, depth = job$depth,
+                   disp_model = job$disp_model, hv = hv)
   }
   if (is.null(sim)) return(NULL)
 
@@ -668,7 +778,8 @@ run_job <- function(job) {
   m <- cu <- st <- list()
   for (nm in names(rr$results)) {
     res <- rr$results[[nm]]
-    m[[nm]]  <- cbind(meta, method = nm, metrics_one(res, is_de, tl, n_de_total))
+    m[[nm]]  <- cbind(meta, method = nm,
+                      metrics_one(res, is_de, tl, n_de_total, sim$is_hv[rr$keep]))
     cu[[nm]] <- cbind(meta, method = nm, curve_one(res, is_de))
     s <- strata_one(res, is_de, tl, ex)
     if (!is.null(s)) st[[nm]] <- cbind(meta, method = nm, s)
@@ -681,7 +792,7 @@ run_job <- function(job) {
 # 5. SUMMARIES, REPORT, PLOTS
 # =============================================================================
 
-CELL <- c("part", "dist", "n_rep", "pi1", "het", "frac_up")
+CELL <- c("part", "dist", "n_rep", "pi1", "het", "frac_up", "depth", "disp_model", "hv_frac")
 
 mean_se <- function(df, keys, cols) {
   g <- interaction(df[keys], drop = TRUE, lex.order = TRUE)
@@ -789,17 +900,20 @@ make_plots <- function(M, CU, ST) {
   if (any(M$part == "Q")) {
     cols <- method_colours(intersect(PCFG$plot_methods, unique(M$method[M$part == "Q"])))
     q <- mean_se(M[M$part == "Q" & M$method %in% names(cols), ], c(CELL, "method"),
-                 c("tpr_ach05", "fpr_null05"))
-    p <- ggplot(q, aes(pi1, tpr_ach05_mean, colour = method)) +
+                 c("tpr_ach05", "tpr_nom_05"))
+    lq <- rbind(data.frame(q[c("pi1", "het", "method")], metric = "TPR @ achieved FDR 0.05 (ranking)",
+                           v = q$tpr_ach05_mean, se = q$tpr_ach05_se),
+                data.frame(q[c("pi1", "het", "method")], metric = "TPR @ nominal 0.05 (threshold)",
+                           v = q$tpr_nom_05_mean, se = q$tpr_nom_05_se))
+    p <- ggplot(lq, aes(pi1, v, colour = method)) +
       geom_line(linewidth = 0.6) + geom_point(size = 1.8) +
-      geom_errorbar(aes(ymin = tpr_ach05_mean - tpr_ach05_se, ymax = tpr_ach05_mean + tpr_ach05_se),
-                    width = 0.05, linewidth = 0.4) +
+      geom_errorbar(aes(ymin = v - se, ymax = v + se), width = 0.05, linewidth = 0.4) +
       scale_x_log10() + scale_colour_manual(values = cols) +
-      facet_wrap(~ het, labeller = label_both) +
+      facet_grid(metric ~ het, labeller = labeller(het = label_both), scales = "free_y") +
       labs(title = "Power vs DE fraction: het = 1 homogeneous effects, het < 1 responder fraction",
            subtitle = "*-oracle pools true nulls only (same Fortran); its gap to the production arm is pool contamination",
-           x = "pi1 (fraction DE, log scale)", y = "TPR at achieved FDR 0.05 (+/- SE)") + th
-    ggsave(file.path(dir, "power_vs_pi1.png"), p, width = 10, height = 5.5, dpi = 150)
+           x = "pi1 (fraction DE, log scale)", y = "TPR (+/- SE)") + th
+    ggsave(file.path(dir, "power_vs_pi1.png"), p, width = 10, height = 8, dpi = 150)
   }
 
   # (5) Part C: composition stress, two small multiples on one x.
@@ -821,18 +935,71 @@ make_plots <- function(M, CU, ST) {
            x = "Delta = log2 sum(pi_a 2^beta)", y = NULL) + th
     ggsave(file.path(dir, "composition_stress.png"), p, width = 10, height = 5, dpi = 150)
   }
+
+  # (6) Parts N / R: input x arm grid. One file per (part, n_rep, metric); facets
+  #     disp_model x depth; x = input; colour = TOX arm; reference tools as lines.
+  grid_labels <- vapply(PCFG$inputs, `[[`, "", "name")
+  arm_cols <- setNames(PALETTE[seq_along(PCFG$grid_arms)], PCFG$grid_arms)
+  refs <- c("limma", "edgeR", "DESeq2")
+  mets <- c(fdr_nom_05 = "observed FDR @ nominal 0.05", tpr_nom_05 = "TPR @ nominal 0.05",
+            tpr_ach05 = "TPR @ achieved FDR 0.05")
+  for (pt in intersect(c("N", "R"), unique(M$part))) {
+    g <- mean_se(M[M$part == pt, ], c(CELL, "method"), names(mets))
+    g$arm   <- sub("\\|.*$", "", g$method)
+    g$input <- ifelse(grepl("\\|", g$method), sub("^.*\\|", "", g$method), NA)
+    for (n in sort(unique(g$n_rep))) for (mt in names(mets)) {
+      gi <- g[g$n_rep == n & !is.na(g$input), ]
+      gr <- g[g$n_rep == n & g$method %in% refs, ]
+      if (!nrow(gi)) next
+      gi$input <- factor(gi$input, levels = grid_labels)
+      y <- paste0(mt, "_mean")
+      p <- ggplot(gi, aes(input, .data[[y]], colour = arm, group = arm)) +
+        geom_hline(data = gr, aes(yintercept = .data[[y]], linetype = method),
+                   colour = "grey45", linewidth = 0.4) +
+        { if (mt == "fdr_nom_05") geom_hline(yintercept = 0.05, colour = "black", linewidth = 0.3) } +
+        geom_line(linewidth = 0.6) + geom_point(size = 1.8) +
+        scale_colour_manual(values = arm_cols) +
+        facet_grid(disp_model ~ depth, labeller = label_both) +
+        labs(title = sprintf("Part %s, n_rep = %d: %s by input", pt, n, mets[[mt]]),
+             subtitle = "Grey lines = reference tools on raw counts. Centred inputs are log arms only.",
+             x = NULL, y = mets[[mt]], linetype = NULL) +
+        th + theme(axis.text.x = element_text(angle = 35, hjust = 1))
+      ggsave(file.path(dir, sprintf("grid_%s_%s_n%d.png", pt, mt, n)), p,
+             width = 11, height = if (pt == "N") 9 else 4.5, dpi = 150)
+    }
+  }
+
+  # (7) Part V: calls on variance-only nulls vs on ordinary nulls.
+  if (any(M$part == "V")) {
+    v <- mean_se(M[M$part == "V", ], c(CELL, "method"), c("fpr_hv05", "fpr_nonhv05"))
+    lv <- rbind(data.frame(v[c("n_rep", "het", "method")], nulls = "variance-only (case dispersion x hv_factor)",
+                           f = v$fpr_hv05_mean, se = v$fpr_hv05_se),
+                data.frame(v[c("n_rep", "het", "method")], nulls = "ordinary",
+                           f = v$fpr_nonhv05_mean, se = v$fpr_nonhv05_se))
+    p <- ggplot(lv, aes(method, f, colour = nulls)) +
+      geom_pointrange(aes(ymin = f - se, ymax = f + se), position = position_dodge(0.5), size = 0.3) +
+      scale_colour_manual(values = PALETTE[1:2]) +
+      facet_grid(het ~ n_rep, labeller = label_both) +
+      labs(title = "Part V: fraction of null genes called at nominal 0.05",
+           subtitle = "Variance-only nulls have no mean change -- every call on them is a false positive",
+           x = NULL, y = "fraction called", colour = NULL) +
+      th + theme(axis.text.x = element_text(angle = 35, hjust = 1))
+    ggsave(file.path(dir, "variance_only_nulls.png"), p, width = 11, height = 6, dpi = 150)
+  }
 }
 
 report <- function(S, PV, OG) {
   line <- function() message(strrep("=", 78))
-  cols <- c("tpr_ach05", "tpr_nom_05", "fdr_nom_05", "fpr_null05", "auc_p", "pauc05_p",
+  cols <- c("tpr_ach05", "tpr_nom_05", "fdr_nom_05", "fpr_null05", "fpr_hv05", "auc_p", "pauc05_p",
             "pauc05_pe", "ap_pe", "lfc80", "floor_blocks05", "zero_disc_05")
   keep <- c(CELL, "method", "n_rounds", paste0(cols, "_mean"))
   for (pt in unique(S$part)) {
     line(); message("PART ", pt, " -- mean over rounds (SE in power_summary.csv)"); line()
     x <- S[S$part == pt, intersect(keep, names(S))]
     num <- vapply(x, is.numeric, logical(1)); x[num] <- lapply(x[num], round, 4)
-    print(x[order(x$dist, x$n_rep, x$pi1, x$het, x$frac_up, x$method), ], row.names = FALSE)
+    x <- x[, vapply(x, function(v) !all(is.na(v)), logical(1)), drop = FALSE]   # drop all-NA metrics
+    print(x[do.call(order, unname(as.list(x[intersect(c(CELL, "method"), names(x))]))), ],
+          row.names = FALSE)
   }
   message("\n  tpr_ach05   TPR at ACHIEVED FDR 0.05: the method-fair power number.")
   message("  tpr_nom_05 / fdr_nom_05  what a user gets at nominal 0.05.")
