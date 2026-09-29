@@ -1,9 +1,25 @@
 # Power benchmarking for TOX — design document
 
-**Status:** implemented as `Simulated_data/scripts/power_test.R` (23.09.2026) — Parts P, Q,
-C and R below map onto §7. Not yet run on the Tensor-Omics build; the script was
-smoke-tested only against a mock of the Fortran wrappers (the R port), so no power result
-exists yet. Every number quoted from existing results is cited to its source file.
+**Status (29.09.2026):** implemented per `docs/power_test_implementation_plan.md` (v3) as
+two scripts plus a metric library:
+
+- `TCGA_test/scripts/power_test.R` — **analysis**: simulate / thin, run every method, save
+  raw per-gene results to `power_raw/<part>/` (not committed) with a per-part `manifest.csv`
+  (cell keys, seeds, effect-draw diagnostics, Part R cohort checks, git commit) and
+  `pcfg_dump.txt`. No metrics.
+- `TCGA_test/scripts/power_report.R` — **interpretation**: every metric, table and plot,
+  from `power_raw/` only (no Fortran, no reference-method run).
+- `common/power_metrics.R` — the metric functions, unit-tested in `TCGA_test/tests/`.
+
+A first run of the earlier single-script version exists: `Simulated_data/results/power_out/`
+(Parts P, Q, C; 5 000 genes, 20 rounds, k20_50, τ = 0.1). It predates the plan's fixes (FDR
+averaging I1, effect draw I3, Δ-targeted Part C I4), so its numbers are superseded once the
+new analysis is run; per-gene results were not saved, so it cannot feed the report script.
+Decisions recorded in the plan (§0): heterogeneous mean-dependent dispersion (Part P+),
+balanced effect draw, `tpr_ach05` kept as is (caveat §2.1), `bimodal` moved to stress arm S,
+real cohorts (Part R, whole cohort split into random halves, 20 repeats) as the **primary**
+evidence, AUPRC columns named `auprc_*`. Every number quoted from existing results is cited
+to its source file.
 
 **Correction (23.09.2026) to §3.2.** The original mechanism — true DE genes inflating their
 neighbours' null pools — is wrong as stated for *homogeneous* effects: TOX's pools are
@@ -73,9 +89,16 @@ they can disagree.
 | metric | definition | why |
 |---|---|---|
 | **FDR–TPR curve** | for every threshold on the adjusted p-value, plot observed FDR (x) vs TPR (y); overlay the points at nominal α ∈ {0.01, 0.05, 0.10} | the standard DE-benchmark display; shows power *and* whether the nominal level is honoured, in one object |
-| `TPR @ achieved FDR = 0.05` | TPR read off that curve at observed FDR 0.05 | method-fair power, independent of whether the method's own α is calibrated |
+| `TPR @ achieved FDR = 0.05` | TPR read off that curve at observed FDR 0.05 | method-fair power, independent of whether the method's own α is calibrated. **Caveat:** truth-thresholded — the maximum over all steps with realised FDR ≤ 0.05, so slightly optimistic on a non-monotone curve and not realisable by a user; `tpr_nom_*` is the user-facing number |
 | `TPR @ nominal α`, `observed FDR @ nominal α` | as now | what a user actually gets |
 | `n_called`, `frac_zero_disc` | as now | keep; instability ≠ conservatism |
+
+**FDR averaging (fixed 29.09.2026, plan I1).** The observed FDP of a round with no calls is
+**0**, not undefined: the reported `fdr_nom_*` is the mean of `V / max(R, 1)`, the quantity BH
+controls. The first run averaged only rounds with ≥ 1 call (`E[V/R | R > 0]`), which inflated
+29 of 200 cells (e.g. `TOX-log-boot`, `bimodal`, n = 3: 0.570 conditional vs 0.086
+zero-filled). The conditional value is still written as `fdr_cond_*`; `frac_zero_disc` is
+printed next to every FDR.
 
 `iCOBRA` (Soneson & Robinson, *Nat Methods* 2016; Bioconductor) computes exactly these:
 `calculate_performance()` → `plot_fdrtprcurve()` draws the curve with the nominal-threshold
@@ -93,7 +116,11 @@ Add:
   is the region BH actually reads.
 - **PR-AUC / average precision.** Under class imbalance the precision–recall plot is the
   more informative of the two (Saito & Rehmsmeier, *PLoS ONE* 2015); with π₁ = 10% the
-  imbalance is real.
+  imbalance is real. Implemented as `auprc_p` / `auprc_pe`: the step-function estimator
+  (no interpolation), ties as one step, untested genes last; `auprc_all_*` uses all true-DE
+  genes as the recall denominator; `prevalence`, `auprc_excess_pe` (= AUPRC − prevalence,
+  comparable across π₁) and `prec_top_nde` (R-precision). The PR curve in `power_pr_curve.csv`
+  is the interpolated envelope, for display only.
 - **Precision @ top-k** for k ∈ {100, 250, 500} — what a biologist reading the top of the
   list gets.
 - **Concordance across rounds (CAT curve)** — fraction of the top-k shared between two
@@ -199,8 +226,13 @@ inflated, they enter its neighbours' case pools, those nulls widen, and power fo
 Prescribed test (`power_test.R` Part Q), stated so it can fail:
 
 - sweep π₁ ∈ {0.01, 0.05, 0.10, 0.30} × responder fraction `het` ∈ {1, 0.5};
-- **prediction:** at `het = 1`, TOX's TPR at achieved FDR 0.05 is flat in π₁ within MC
-  error; at `het = 0.5` it declines with π₁, relative to limma;
+- **re-specified (29.09.2026, plan I5).** The original prediction was stated on TPR at
+  achieved FDR, which cannot test it: that metric rises with π₁ even without contamination
+  (FDR = π₀·FPR / (π₀·FPR + π₁·TPR)), and it is invariant to a monotone inflation of
+  p-values, which is how contamination acts. The first run showed exactly that: oracle −
+  production ≈ 0 in achieved-FDR TPR (|Δ| ≤ 0.007) but +0.005 → +0.092 in nominal TPR and
+  +0.004 null FPR at het = 0.5, π₁ = 0.30. Contamination is a **calibration** effect, so it
+  is now tested on calibration quantities (P3′ in §7) and on the pool diagnostics below;
 - **the isolating arm:** the production Fortran re-run with the pool restricted to true
   nulls (`TOX-log-oracle`, `TOX-log-blocked-oracle`). The Fortran pools every gene it is
   handed, so this is done through the input: one call with the null genes only (their
@@ -211,6 +243,14 @@ Prescribed test (`power_test.R` Part Q), stated so it can fail:
 
 The oracle arm is a diagnostic that uses the truth — legitimate precisely because it is
 never a candidate method.
+
+**Pool diagnostics.** The Fortran returns the pool *size* (`neighborhood_size_own_*`, saved
+per gene in the raw output), not its width. Width comes from `common/tox_null_reimpl.R::
+tox_diagnose()` (exact engine, pooled null, log) on a random 200-gene subset per Part Q job,
+production pool vs oracle pool, used only when `validate_against_fortran()` reproduces the
+Fortran p-values on that dataset (`gate_ok`). **Confound:** the oracle removes DE genes from
+the candidates, so its neighbours lie further away in mean (≈ 1/(1 − π₁) wider span at
+π₁ = 0.30); `mean_span_*` measures that directly and must be read beside `sd_pool_*`.
 
 ### 3.3 Ties, when ranking
 
@@ -260,10 +300,16 @@ Consequences for benchmarking:
   fraction (0.5 → 1.0) so Δ grows, and report each method against *both* truths
   (β and β − Δ). Expected and worth stating: TOX and every TPM-native method track β − Δ;
   TMM/median-of-ratios-normalised count methods track β; neither is wrong, they estimate
-  different things. The deliverable is the **breakdown point** — the Δ at which the FPR of
-  each method against its *own* estimand exceeds 2×. This is the empirical counterpart of
-  the identifiability result already derived (the technical noise floor is not identifiable
-  from TPM alone), and it belongs in the thesis as a limitation with a number attached.
+  different things. The deliverable is the **breakdown point**. This is the empirical
+  counterpart of the identifiability result already derived (the technical noise floor is
+  not identifiable from TPM alone), and it belongs in the thesis as a limitation with a
+  number attached. **Implemented (29.09.2026, plan I4)** as: Part C is parameterised by a
+  **target Δ ∈ {0, 0.25, 0.5, 1}** (balanced draw, then the up side's log2 FCs scaled until
+  log2 Σ π_a 2^β = Δ) at n ∈ {3, 5, 10}, `nb` and `lnpois`, scored against β; the breakdown
+  point is the smallest Δ whose zero-filled FDR at nominal 0.05 exceeds 0.10, with a
+  percentile bootstrap CI over rounds (`power_breakdown.csv`). The first run swept the
+  up-fraction instead, which gave Δ ≠ 0 even at up-fraction 0.5 (0.128 ± 0.095) and a range
+  too narrow to locate a breakdown.
 
 ### 4.3 A shared gene universe is required
 
@@ -413,9 +459,16 @@ control for all of these — π₁ = 0 on the same data, same pipeline.
 
 ## 7. Implementation plan
 
-**Implemented:** `Simulated_data/scripts/power_test.R` — Part P (main grid), Part Q (π₁ ×
-heterogeneity + oracle), Part C (composition stress with TPM / median-centred TPM / TMM-CPM
-inputs), Part R (binomial thinning on a user-supplied real cohort). The real-truth datasets
+**Implemented (29.09.2026):** `TCGA_test/scripts/power_test.R` + `power_report.R` +
+`common/power_metrics.R` (§9). Parts: R (real cohorts, primary), P (nb / lnpois / tpois),
+P+ (dispersion heterogeneity, null + power arms), Q (π₁ × heterogeneity + oracle + pool
+diagnostics), C (Δ-targeted composition stress), S (`bimodal`, stress only), N (input scale ×
+correction under depth / dispersion nuisance), V (variance-only nulls), D (DESeq2
+diagnostic). The effect draw is **balanced** (plan I3): signs symmetric, |log2 FC|
+log-uniform on [0.25, 4], then the side that moves more relative abundance is shrunk by one
+common factor so Σ_DE π_a 2^β = Σ_DE π_a — nulls exactly null in TPM *and* no shift of the DE
+effects. The first run renormalised within the DE set instead, which shifted every effect by
+log2(cs) (median −0.89) and flipped ≈ 23% of the signs. The real-truth datasets
 of §6 are not in it. Differences from the plan below: the metrics are computed in-script
 (tie-aware step ROC, so p-value ties are never split) rather than via iCOBRA; and the
 thinning is done directly with `rbinom` with the larger-loss side scaled down so both groups
@@ -532,17 +585,26 @@ rather than assuming the design was achieved.
 | TOX arms | exact/bootstrap × norm 0/1 × k grid, + oracle-pool arm | §3.2 |
 | rounds | ≥ 20 for anything reported | §2.5 |
 
-**Prespecified predictions** (in the style of `claude/raw_normalisation_diagnosis.md` — each
+**Prespecified predictions** (in the style of `docs/raw_normalisation_diagnosis.md` — each
 stated so it can fail):
 
 | | prediction | falsifies what if wrong |
 |---|---|---|
 | P1 | TOX-log TPR at *achieved* FDR 0.05 is within ~10% of limma's on `nb`/`lnpois`; the visible gap at *nominal* levels is threshold placement, not ranking | that the current TPR gap is a calibration artefact |
-| P2 | at `het = 1` TOX's TPR is flat in π₁; at `het = 0.5` it declines with π₁ relative to limma (§3.2, corrected) | that within-group centring neutralises constant effects / that variance-inflating DE contaminates pools |
-| P3 | `TOX-log-oracle` − `TOX-log` ≈ 0 at `het = 1` and > 0 at `het = 0.5`, growing with π₁ | the contamination mechanism, decisively |
+| P2′ | (re-specified 29.09.2026, I5) the paired TOX − limma contrast in TPR at achieved FDR 0.05 vs π₁, at `het = 0.5` and `het = 1`. The first run showed −0.027 → +0.161 at `het = 0.5` — the **opposite** of the original P2. The mechanism behind TOX's advantage there is an **untested hypothesis**, not a finding; Part V (variance-only nulls) is the check on it | that TOX's relative power is independent of π₁ |
+| P3′ | (re-specified 29.09.2026, I5) contamination is a calibration effect: paired oracle − production differences in zero-filled `fdr_nom_05`, `fpr_null05`, `n_called_05`, `tpr_nom_05` ≈ 0 at `het = 1` and ≠ 0 at `het = 0.5`, growing with π₁; `tpr_ach05` is the expected-null control; pool diagnostics (`sd_pool_*` read with `mean_span_*`) show the widening directly | the contamination mechanism, decisively |
 | P4 | TPR is markedly lower in the lowest and highest expression deciles, where the kNN neighbourhood is one-sided in mean | that the neighbourhood is expression-neutral |
 | P5 | on real thinned data, edgeR's power advantage over TOX shrinks or reverses relative to the synthetic arms — mirroring its calibration reversal between `nb` and TCGA | the claim that synthetic benchmarks flatter parametric tools |
-| P6 | pAUC@0.05 separates the methods by more than full AUC does (which spans < 0.03 today) | that the AUC's flatness is an imbalance artefact rather than genuine equivalence |
+| P6 | pAUC@0.05 and AUPRC separate the methods by more than full AUC does (which spans < 0.03 today); `auprc_range` is in the spread table | that the AUC's flatness is an imbalance artefact rather than genuine equivalence |
+
+**Headline claims come from Part R** (real cohorts). Parts P / P+ / Q / C are mechanism and
+supporting evidence; Part S (`bimodal`) is a stress case only. **Known open observation, not
+investigated:** on `bimodal`, limma's power *falls* with n (0.453 / 0.328 / 0.295 at
+n = 3 / 5 / 10 in the first run); nobody should read Part S as a ranking. **DESeq2 (I7):**
+≈ 2× nominal FDR on `nb` (0.107 / 0.103 / 0.092 at n = 3 / 5 / 10) on its own model, cause
+not established; Part D runs the null and power arms with `independentFiltering = TRUE` and
+`cooksCutoff = FALSE` variants (and records `n_tested`, `n_padj_na`). The reference arm is not
+changed until diagnosed.
 
 ---
 
@@ -562,23 +624,30 @@ stated so it can fail):
 
 ---
 
-## 9. How to run `power_test.R` (Phase 6 of `run_order.md` — independent of Phases 3–5)
+## 9. How to run the power benchmark
 
-**`Simulated_data/scripts/power_test.R`** — pure simulation, no TCGA data. Needs the
-    Tensor-Omics build carrying `null_method` (the `*-blocked` arms). Run from the
-    Tensor-Omics root next to `calibration_test.R` and `config.R`; every TOX p-value,
-    including the oracle arms, comes from the compiled Fortran.
-    - Smoke test first: `POWER_GENES=1000 POWER_ROUNDS=2 POWER_CORES=4 Rscript power_test.R`.
-    - Full: `POWER_PARTS=P,Q,C` (default), 20 rounds, 32 cores. The oracle arms make
-      one Fortran call per DE gene (up to 1,500 at π₁ = 0.3), each a full prepare+gather
-      pass; DESeq2 is likely still the slowest arm.
-    - Part R (real-data thinning): `POWER_PARTS=R POWER_REAL_RDS=<cohort.rds>`, where the RDS
-      is `list(counts = genes × samples, tpm = … or lengths = …)` for ONE homogeneous cohort
-      (e.g. a TCGA stage: `load_counts_matrix(pid, stage)` + its raw TPM, same samples).
-    → `power_out/power_{per_round,summary,paired_vs_ref,fdr_tpr_curve,stratified,fidelity}.csv` + plots.
+Run from the Tensor-Omics root (rcpp/ and external/ resolve relative to it; `common/` and
+`calibration_test.R` are found relative to the script). Needs the current Tensor-Omics
+build (`./build.sh` first — the stale-build trap).
 
-The real-truth datasets of `power_benchmark_design.md` §6 (Everaert qPCR, SEQC ERCC,
-Quartet, yeast subsampling) are still not scripted.
+1. **Real cohorts (Part R):** `Rscript TCGA_test/scripts/export_power_cohort.R all <dir>`
+   writes the six base cohorts (COAD / LUAD / KIRC × healthy / Stage IV) from the NAS.
+2. **Dispersion parameters (Part P+):** `Rscript TCGA_test/scripts/estimate_dispersion_trend.R
+   disp_params.rds <dir>/coad_healthy.rds <dir>/luad_healthy.rds <dir>/kirc_healthy.rds`
+   (without it P+ runs on placeholders, flagged `disp_source = placeholder`).
+3. **Smoke test:** `POWER_GENES=1000 POWER_ROUNDS=2 POWER_CORES=4 Rscript TCGA_test/scripts/power_test.R`.
+4. **Full analysis:** `POWER_REAL_RDS=<six comma-separated RDS> POWER_DISP_PARAMS=disp_params.rds
+   POWER_CORES=32 Rscript TCGA_test/scripts/power_test.R` (20 rounds, all parts;
+   `POWER_PARTS` selects a subset; each part's `power_raw/<part>/` is replaced by its run;
+   seeds depend only on (part, job index), so a subset run reproduces the full run's
+   datasets). The server copy has no `.git`: set `POWER_GIT_COMMIT` for the manifest.
+5. **Report:** `Rscript TCGA_test/scripts/power_report.R` →
+   `power_out/power_{per_round,summary,paired_vs_ref,fdr_tpr_curve,pr_curve,stratified,oracle_gap,pool_diag,breakdown,real_checks}.csv`
+   + plots. `POWER_RAW_DIR` / `POWER_OUT_DIR` override the locations.
+6. **Tests:** `Rscript -e 'testthat::test_dir("TCGA_test/tests")'` from the testing-repo root.
+
+The real-truth datasets of §6 (Everaert qPCR, SEQC ERCC, Quartet, yeast subsampling) are
+still not scripted.
 
 ---
 
