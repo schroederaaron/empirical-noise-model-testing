@@ -1,6 +1,6 @@
 # io.R -- input contract (brief section 3), builders, integer audit, provenance.
 
-DATASET_SOURCES <- c("salmon_tximport", "featureCounts", "tcga_counts_rds", "simulated")
+DATASET_SOURCES <- c("salmon_tximport", "featureCounts", "tcga_counts_rds", "simulated", "htseq_counts")
 
 #' Assemble a dataset object and check it against the input contract.
 new_dataset <- function(counts, samples, design, lengths = NULL, source, label) {
@@ -90,6 +90,60 @@ build_from_featurecounts <- function(file, samples, design, label) {
   Y <- Y[, as.character(samples$sample_id), drop = FALSE]
   new_dataset(counts = Y, samples = samples, design = design, lengths = NULL,
               source = "featureCounts", label = label)
+}
+
+HTSEQ_SUMMARY_ROWS <- c("no_feature", "ambiguous", "too_low_aQual", "not_aligned", "alignment_not_unique")
+
+#' A directory of htseq-count tables (two tab-separated columns: feature, count),
+#' one file per sample, named <condition>_rep<NN>_MID<m>_...gbgout as in the
+#' yeast 48x48 data (bartongroup/profDGE48). The 5 htseq summary rows are dropped;
+#' every file must then carry the same features in the same order. `exclude_file`
+#' lists bad replicates as the count file names without ".gbgout"; every entry must
+#' match exactly one file. With drop_bad = TRUE they are removed, otherwise kept and
+#' flagged in samples$bad_replicate.
+build_from_htseq_dir <- function(count_dir, exclude_file, label, drop_bad) {
+  files <- sort(list.files(count_dir, pattern = "\\.gbgout$", full.names = TRUE))
+  if (!length(files)) stop("no *.gbgout files in ", count_dir)
+  base <- sub("\\.gbgout$", "", basename(files))
+  m <- regmatches(base, regexec("^([A-Za-z0-9]+)_rep([0-9]+)_MID([0-9]+)_", base))
+  bad_name <- lengths(m) != 4L
+  if (any(bad_name)) stop("unexpected count file names: ", paste(basename(files)[bad_name], collapse = ", "))
+  m <- do.call(rbind, m)
+
+  tabs <- lapply(files, function(f) {
+    t <- utils::read.delim(f, header = FALSE, colClasses = c("character", "numeric"), quote = "")
+    if (ncol(t) != 2L) stop(basename(f), ": expected 2 columns, found ", ncol(t))
+    t[!(t[[1]] %in% HTSEQ_SUMMARY_ROWS), , drop = FALSE]
+  })
+  feat <- tabs[[1]][[1]]
+  for (i in seq_along(tabs))
+    if (!identical(tabs[[i]][[1]], feat))
+      stop("feature list of ", basename(files[i]), " differs from ", basename(files[1]))
+  Y <- do.call(cbind, lapply(tabs, `[[`, 2L))
+  dimnames(Y) <- list(feat, paste0(m[, 2], "_rep", m[, 3]))
+
+  excl <- trimws(readLines(exclude_file, warn = FALSE))
+  excl <- excl[nzchar(excl)]
+  hits <- vapply(excl, function(e) sum(base == e), 0L)
+  if (any(hits != 1L))
+    stop("exclude list entries not matching exactly one count file: ", paste(excl[hits != 1L], collapse = ", "))
+
+  samples <- data.frame(sample_id = colnames(Y),
+                        condition = factor(m[, 2], levels = c("WT", "Snf2")),
+                        replicate = as.integer(m[, 3]),
+                        mid = as.integer(m[, 4]),
+                        bad_replicate = base %in% excl,
+                        lib_size = colSums(Y),
+                        stringsAsFactors = FALSE)
+  if (anyNA(samples$condition)) stop("conditions other than WT / Snf2: ", paste(unique(m[, 2]), collapse = ", "))
+  if (drop_bad) {
+    keep <- !samples$bad_replicate
+    Y <- Y[, keep, drop = FALSE]
+    samples <- samples[keep, , drop = FALSE]
+  }
+  rownames(samples) <- NULL
+  new_dataset(counts = Y, samples = samples, design = ~ condition, lengths = NULL,
+              source = "htseq_counts", label = label)
 }
 
 #' Raw COUNTS (genes x samples) for a TCGA cancer stage OR the matched-normal cohort.

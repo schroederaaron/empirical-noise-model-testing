@@ -6,6 +6,9 @@
 #     Rscript Distribution_GOF/scripts/make_dataset.R --SOURCE=tcga --PROJECT=TCGA-KIRC --STAGE=healthy
 #   Simulated NB (pipeline checks without real data):
 #     Rscript Distribution_GOF/scripts/make_dataset.R --SOURCE=simulated --N_GENES=2000 --N_PER_GROUP=24
+#   Yeast 48x48 htseq-count tables (bartongroup/profDGE48):
+#     Rscript Distribution_GOF/scripts/make_dataset.R --SOURCE=yeast48 --COUNT_DIR=<dir of *.gbgout> \
+#       --EXCLUDE_LIST=<profDGE48>/Bad_replicate_identification/exclude.lst --DROP_BAD=TRUE --LABEL=yeast48_clean
 #
 # Optional: --LABEL=<id> (default derived from the inputs), --OUT=<path.rds>
 # (default <OUT_ROOT>/datasets/<label>.rds, i.e. under the git-ignored results/).
@@ -30,7 +33,13 @@ ds <- switch(src,
   },
   simulated = build_simulated(as.integer(arg("N_GENES", "2000")), as.integer(arg("N_PER_GROUP", "24")),
                               seed = GOF_CONFIG$BASE_SEED, label = arg("LABEL", "simNB")),
-  stop("--SOURCE must be 'tcga' or 'simulated' (got '", src, "')"))
+  yeast48 = {
+    cdir <- arg("COUNT_DIR"); excl <- arg("EXCLUDE_LIST"); drop <- as.logical(arg("DROP_BAD"))
+    if (!nzchar(cdir) || !nzchar(excl) || is.na(drop))
+      stop("--SOURCE=yeast48 needs --COUNT_DIR=<dir>, --EXCLUDE_LIST=<exclude.lst> and --DROP_BAD=TRUE|FALSE")
+    build_from_htseq_dir(cdir, excl, arg("LABEL", if (drop) "yeast48_clean" else "yeast48_all"), drop)
+  },
+  stop("--SOURCE must be 'tcga', 'simulated' or 'yeast48' (got '", src, "')"))
 
 out <- arg("OUT", file.path(GOF_CONFIG$OUT_ROOT, "datasets", paste0(ds$label, ".rds")))
 dir.create(dirname(out), recursive = TRUE, showWarnings = FALSE)
@@ -40,6 +49,8 @@ au <- integer_audit(ds$counts)
 cat(sprintf("dataset '%s' (%s): %d genes x %d samples, design %s\n", ds$label, ds$source,
             nrow(ds$counts), ncol(ds$counts), deparse(ds$design)))
 print(au[section == "overall"], row.names = FALSE)
+if ("condition" %in% names(ds$samples)) print(table(condition = ds$samples$condition))
+data.table::fwrite(au, paste0(sub("\\.rds$", "", out), "_input_audit.csv"))
 if (audit_has_fractional(au))
   cat("NOTE: non-integer counts present -- 02_run_gof.R stops under ROUNDING = 'error';",
       "choose --ROUNDING=stochastic or floor (decision D1).\n")
