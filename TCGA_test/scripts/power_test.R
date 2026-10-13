@@ -46,8 +46,8 @@
 #       independentFiltering = TRUE vs cooksCutoff = FALSE. No TOX.
 #
 # RAW OUTPUT (PCFG$raw_dir/<part>/; not committed)
-#   results_<job>.csv.gz   one row per (method, gene): p, padj, lfc, tie, floor_th,
-#                          nbhd_own_case, nbhd_own_control, lfc_scale
+#   results_<job>.csv.gz   one row per (method, gene): p, padj, lfc, log2fc, tie,
+#                          floor_th, nbhd_own_case, nbhd_own_control, lfc_scale
 #   truth_<job>.csv.gz     one row per gene: is_de, true_lfc, expr, kept, is_hv
 #                          (+ realised_lfc in Part R)
 #   diag_<job>.csv.gz      Part Q: pool diagnostics on a gene subset
@@ -469,9 +469,12 @@ simulate_real <- function(cohort, pi1) {
 
 # =============================================================================
 # 2. METHODS
-# Each returns data.frame(gene, p, padj, lfc, tie, floor_th, nbhd_own_case,
-# nbhd_own_control, lfc_scale). p = raw p (NA = untested); tie = |log2 FC of group
-# means|, the p_eff tie-break.
+# Each returns data.frame(gene, p, padj, lfc, log2fc, tie, floor_th, nbhd_own_case,
+# nbhd_own_control, lfc_scale) -- the SAME columns for every method, because all
+# methods' frames are rbind-ed into one results file. p = raw p (NA = untested);
+# lfc = the method's own statistic; log2fc = its effect size (TOX: the model's
+# log2((mean_B + 1)/(mean_A + 1)); edgeR/limma/DESeq2: their logFC); tie = |log2 FC
+# of group means|, the p_eff tie-break.
 # =============================================================================
 
 group_lfc <- function(tpm, group)
@@ -554,9 +557,9 @@ run_tox_oracle <- function(mat, group, arm, tie, is_null) {
   out <- data.frame(gene = rownames(mat), p = NA_real_, padj = NA_real_,
                     lfc = rowMeans(lg(mat[, group == "B", drop = FALSE])) -
                           rowMeans(lg(mat[, group == "A", drop = FALSE])),
-                    tie = tie, floor_th = NA_real_, nbhd_own_case = NA_integer_,
+                    log2fc = NA_real_, tie = tie, floor_th = NA_real_, nbhd_own_case = NA_integer_,
                     nbhd_own_control = NA_integer_, lfc_scale = r0$lfc_scale[1])
-  cols <- c("p", "floor_th", "nbhd_own_case", "nbhd_own_control")
+  cols <- c("p", "log2fc", "floor_th", "nbhd_own_case", "nbhd_own_control")
   out[nul, cols] <- r0[cols]
   last <- length(nul) + 1L
   for (g in which(!is_null))
@@ -605,7 +608,7 @@ run_methods_power <- function(sim, part) {
     if (!is.null(r)) out[[nm]] <<- r
   }
   ref_tag <- function(df) data.frame(gene = df$gene, p = df$stat, padj = df$padj, lfc = df$lfc,
-                                     tie = tie, floor_th = NA_real_, nbhd_own_case = NA_integer_,
+                                     log2fc = df$lfc, tie = tie, floor_th = NA_real_, nbhd_own_case = NA_integer_,
                                      nbhd_own_control = NA_integer_, lfc_scale = "log2")
 
   if (PCFG$run_edger)  safe("edgeR",  ref_tag(run_edger (counts, grp)))
