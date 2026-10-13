@@ -139,19 +139,17 @@ build_model_args <- function(cancer_preproc, healthy_preproc, gene_results,
   n_genes   <- nrow(gene_results)
   stage_col <- gsub(" ", "_", stage)
 
-  obs_own <- gene_results[[paste0("shift_vs_own_healthy_unscaled_", stage_col)]]
-  valid_genes_own <- as.integer(!is.na(obs_own))
-  obs_own[is.na(obs_own)] <- 0
+  # The model computes the observed statistic itself; the shift column only
+  # still decides WHICH genes are tested (NA = not testable upstream).
+  valid_genes_own <- as.integer(!is.na(
+    gene_results[[paste0("shift_vs_own_healthy_unscaled_", stage_col)]]))
 
   norm_method_int <- switch(norm_method,
     "raw" = 0L, "log" = 1L, "std_log" = 1L, "full" = 1L, 0L)
 
   list(
-    case_means         = as.numeric(cancer_preproc$means),
     case_replicates    = cancer_preproc$prelog,
-    control_means      = as.numeric(healthy_preproc$means),
     control_replicates = healthy_preproc$prelog,
-    obs_own            = as.numeric(obs_own),
     valid_genes_own    = valid_genes_own,
     norm_method        = norm_method_int,
     k_start            = K_START,
@@ -256,6 +254,7 @@ process_combination_all_models <- function(cancer_type, project_id, norm_method,
         signed_difference        = shift,
         distance_p_value         = dist_p,
         noise_p_value            = noise_p,
+        log2fc                   = res$log2fc[g],
         family_size              = family_size,
         neighborhood_size_cancer = n_cancer[g],
         neighborhood_size_healthy= n_own[g],

@@ -507,20 +507,16 @@ run_tox_arm <- function(mat, group, arm, tie, test_only = NULL) {
   G <- nrow(mat)
   case_rep <- t(mat[, group == "B", drop = FALSE])
   ctrl_rep <- t(mat[, group == "A", drop = FALSE])
-  case_means <- colMeans(case_rep); ctrl_means <- colMeans(ctrl_rep)
-  obs <- if (arm$norm == 0L) case_means - ctrl_means
-         else colMeans(log2(pmax(case_rep, 0) + 1)) - colMeans(log2(pmax(ctrl_rep, 0) + 1))
-  valid <- as.integer(is.finite(obs))
+  # The model computes the means and the observed statistic itself (mean
+  # difference, or log2 Frechet-mean difference) and centres it on request.
+  valid <- rep(1L, G)
   if (!is.null(test_only)) valid[-test_only] <- 0L
-  if (isTRUE(arm$centre) || identical(arm$input, "tpm_centred"))
-    obs <- obs - median(obs[is.finite(obs)])
-  obs[!is.finite(obs)] <- 0
+  centre <- as.integer(isTRUE(arm$centre) || identical(arm$input, "tpm_centred"))
 
   fn <- if (arm$engine == "exact") tox_compute_noise_pvalues_pipeline_exact
         else tox_compute_noise_pvalues_pipeline
-  res <- fn(case_means = as.numeric(case_means), case_replicates = case_rep,
-            control_means = as.numeric(ctrl_means), control_replicates = ctrl_rep,
-            obs_own = as.numeric(obs), valid_genes_own = valid,
+  res <- fn(case_replicates = case_rep, control_replicates = ctrl_rep,
+            valid_genes_own = valid, beta_centre = centre,
             norm_method = arm$norm,
             k_start = PCFG$kcfg$k_start, k_step = PCFG$kcfg$k_step, k_max = PCFG$kcfg$k_max,
             tau = PCFG$tau, null_method = arm$null, max_pool_size = PCFG$max_pool)
@@ -532,7 +528,8 @@ run_tox_arm <- function(mat, group, arm, tie, test_only = NULL) {
   # Theoretical per-gene floor where it is known in closed form.
   floor_th <- if (arm$engine == "exact") ifelse(nc > 0 & nt > 0, 1 / (as.numeric(nc) * nt + 1), NA_real_)
               else if (arm$null == 0L) rep(1 / 10001, G) else rep(NA_real_, G)   # N_BOOTSTRAP_DRAWS
-  data.frame(gene = rownames(mat), p = p, padj = padj, lfc = obs, tie = tie,
+  data.frame(gene = rownames(mat), p = p, padj = padj, lfc = res$obs_own,
+             log2fc = res$log2fc, tie = tie,
              floor_th = floor_th, nbhd_own_case = nc, nbhd_own_control = nt,
              lfc_scale = if (arm$norm == 0L) "linear" else "log2", row.names = NULL)
 }

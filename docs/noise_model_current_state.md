@@ -87,9 +87,42 @@ The layer lived, per side (case and control), between `gather_residuals_helper` 
 - **Per-gene flow.** Stratify the case pool → select the target's stratum; same for control; then the p-value ran on the selected strata (bootstrap draws in the baseline model; sqrt-scale + exact tail count in the exact model), gated on each stratum having ≥ 10 residuals.
 - **ABI diagnostic.** Two outputs, `chosen_n_bins_own_case` / `chosen_n_bins_own_control`, carried the chosen bin count per side **sign-encoded**: magnitude = bin count, sign = criteria met (+) vs coarse fallback (−), `-1` = not computed. These were surfaced through the Rcpp entry (`chosen_n_bins_own_case/control` list elements) and consumed by the R comparison/calibration scripts. They were removed with the layer.
 
+## Inputs: what the model computes itself (all three modules)
+
+The caller passes **only the replicate matrices** (`samples × genes`, pre-log). Per gene and side, the model computes:
+
+- the **mean** — the linear arithmetic mean of the replicates. It is the kNN coordinate the neighbourhood is matched in, and nothing else.
+- the **centre** — the value the residuals are centred on: that same mean on the linear branch (`norm_method = 0`), the log2 **Fréchet** mean `mean_i log2(x_i + 1)` on the log branch.
+
+The **observed statistic** is `centre_case − centre_control`, so it sits on exactly the scale the residual pools carry. By Jensen's inequality the Fréchet mean cannot be recovered from the linear mean, which is why the model reads the replicates. One helper does this for every module: `compute_gene_centres_helper`, whose expressions match `prepare_sorted_data_helper`'s centring term for term. The exact module carries a byte-identical copy, and `noise_model_md` uses `noise_model`'s copy per axis and side.
+
+```fortran
+subroutine compute_noise_pvalue_pipeline( &          ! both scalar modules
+    replicates_case, n_genes_case, n_replicates_case, &
+    replicates_control, n_genes_control, n_replicates_control, &
+    compute_pvalue_own, beta_centre, &
+    n_genes, norm_method, k_start, k_step, k_max, tau, null_method, &   ! no null_method in noise_model_exact
+    pvalues_own, observed_statistic_own, log2fc, delta_hat, n_genes_with_pvalue, &
+    max_pool_size, &
+    neighborhood_size_own_case, neighborhood_size_own_control, &
+    neighborhood_size_case, ierr)
+```
+
+- `observed_statistic_own` is an **output**: the statistic the p-value was computed for. R returns it as `obs_own` and uses it as the reported `lfc`.
+- `log2fc` is an **output**: the **effect size** reported next to the p-value. It is
+  `log2(mean_case + 1) − log2(mean_control + 1)` on the linear means, with negatives clamped to 0
+  (`compute_log2fc_helper`). It is the same quantity for every `norm_method` and is **never
+  centred**. It is deliberately not the test statistic: on the log branch the statistic is the
+  difference of log2 Fréchet (geometric) means, which sits below `log2fc` by Jensen's gap, and on
+  the linear branch the statistic is not on a log scale at all. R returns it as `log2fc`.
+- `delta_hat` is the median statistic across genes, the estimated composition shift. It is always reported.
+- `beta_centre = 1` subtracts `delta_hat` before scoring (median centring of log-ratios, see *Normalisation* below). The flag and its semantics are the same as in `noise_model_md` at `d = 1`. It must be 0 whenever the R side has already normalised. Any value other than 0 or 1 gives `ERR_INVALID_INPUT`.
+
+The C entries keep one ABI for both scalar modules, and so does the Rcpp driver. The R wrappers are `tox_compute_noise_pvalues_pipeline[_exact](case_replicates, control_replicates, valid_genes_own = NULL, beta_centre = 0L, norm_method, k_start, k_step, k_max, tau, null_method, max_pool_size)`. `valid_genes_own = NULL` tests every gene. The binding stops if the vector does not have one entry per gene column.
+
 ## Input dimension check (both scalar modules)
 
-Both `compute_noise_pvalue_pipeline` entry points index the case means, the control means, the replicate matrices and the observed statistic with **one** gene index, so all of them must describe the same genes: `n_genes_case == n_genes_control == n_genes`. Otherwise the pipeline returns `ierr = ERR_DIM_MISMATCH` (203) before computing anything. The typical cause is a replicate matrix handed over genes × samples (the edgeR/DESeq2 convention) instead of samples × genes, which swaps the gene and replicate counts; without the check such a call ran to completion and scored the wrong matrix. On the R side, `null_calibration.R` treats any non-zero `ierr` as a hard error of that run (it shows up in "[k/N runs OK]") instead of an arm that silently yields no p-values.
+Both `compute_noise_pvalue_pipeline` entry points index both replicate matrices and every per-gene array with **one** gene index, so they must all describe the same genes: `n_genes_case == n_genes_control == n_genes`. Otherwise the pipeline returns `ierr = ERR_DIM_MISMATCH` (203) before computing anything. The typical cause is a replicate matrix handed over genes × samples (the edgeR/DESeq2 convention) instead of samples × genes, which swaps the gene and replicate counts; without the check such a call ran to completion and scored the wrong matrix. On the R side, `null_calibration.R` treats any non-zero `ierr` as a hard error of that run (it shows up in "[k/N runs OK]") instead of an arm that silently yields no p-values.
 
 ## Multidimensional (multi-axis) noise model — `noise_model_md`
 
@@ -97,7 +130,7 @@ A third module, `src/tox/tox_noise_model_md.F90` (`module noise_model_md`), gene
 
 ### Statistic — two norms, two jobs
 
-Per gene `g` and axis `a = 1…d`, `beta_hat(a) = mean_case(g,a) − mean_ctrl(g,a)` (with two groups and no covariates this is the OLS estimate, i.e. per axis identical to today's `obs_own`). Two norms are computed, and both are calibrated because the weights are applied to observed and null alike:
+Per gene `g` and axis `a = 1…d`, `beta_hat(a) = centre_case(g,a) − centre_ctrl(g,a)`, computed from the replicates exactly as in the scalar modules. With two groups and no covariates this is the OLS estimate, and per axis it is identical to the scalar `obs_own`. Two norms are computed, and both are calibrated because the weights are applied to observed and null alike:
 
 ```
 D     = sqrt( sum_a beta_hat(a)^2 )                    effect size, log2FC units
@@ -160,39 +193,34 @@ Every sample must belong to exactly one axis: no plant, subject, extraction batc
 ### Entry points and arguments
 
 ```fortran
-subroutine compute_beta_md(replicates_case_packed, n_rep_case_per_axis, &
-                           replicates_control_packed, n_rep_control_per_axis, &
-                           n_genes, n_axes, norm_method, beta_obs, ierr)
-
 subroutine compute_noise_pvalue_pipeline_md( &
-    means_case, replicates_case_packed, n_rep_case_per_axis, &
-    means_control, replicates_control_packed, n_rep_control_per_axis, &
-    beta_obs, compute_pvalue_own, beta_mode, beta_centre, &
+    replicates_case_packed, n_rep_case_per_axis, &
+    replicates_control_packed, n_rep_control_per_axis, &
+    compute_pvalue_own, beta_centre, &
     n_genes, n_axes, norm_method, k_start, k_step, k_max, tau, &
     null_method, sampling_mode, n_draws_max, n_exceed_target, enum_max_product, &
     seed, max_pool_size, &
     pvalues_own, d_obs, d_std_obs, d_sq_null_mean, method_used, n_draws_used, &
     neighborhood_size_case, neighborhood_size_control, var_null, &
-    beta_check_cor, beta_check_mad, delta_hat, &
+    beta_obs, log2fc, delta_hat, &
     n_genes_with_pvalue, ierr)
 ```
 
-`compute_beta_md` takes the **packed replicates**, not the means: on the log2 branch the statistic that is scale-coherent with the residual pools is the difference of **Fréchet** means, `mean_i log2(x_i + c)`, and by Jensen's inequality that cannot be recovered from the linear-space mean. On the linear branch the two coincide. The `means_*` arrays keep their real job — the coordinate the kNN neighbourhood is matched in — and are not involved in the statistic.
+The model computes the per-axis means (the kNN coordinate) and `beta_obs` from the packed replicates itself, one axis block at a time, with the shared `compute_gene_centres_helper` (see *Inputs* above). Because the scalar exact module uses the same helper, the `d = 1` statistic is identical to its `obs_own` by construction.
 
 **Data layout.** Ragged replicate counts per axis and per side are required, so there is no rectangular `(n_rep, n_genes, d)` array and no padding (padding would put sentinel values into a matrix whose consumers have no concept of sentinels):
 
 ```
 replicates_packed(sum_a n_rep_a · n_genes)   ! axis blocks, each (n_rep_a, n_genes)
 n_rep_per_axis(n_axes)
-means(n_genes, n_axes)
 ```
 
 **Samples-fastest within each block**, matching `prepare_sorted_data_helper`, which reads whole contiguous columns. Each axis is handed to that routine as an ordinary 2-D matrix by **pointer bounds remapping** — no copy, and not sequence association (these are module procedures with explicit interfaces, where a rank mismatch is a hard error). R matrices are already column-major in this layout, so packing on the Rcpp side is a `memcpy`.
 
 | argument | shape | meaning |
 |---|---|---|
-| `beta_obs` | `(n_axes, n_genes)` | gene-contiguous; filled when `beta_mode = 0`, returned **centred** when `beta_centre = 1` |
-| `beta_mode` | scalar | `0` compute internally (default, scale-coherent); `1` caller-supplied |
+| `beta_obs` | `(n_axes, n_genes)` | **output**, gene-contiguous; computed from the replicates, returned **centred** when `beta_centre = 1` |
+| `log2fc` | `(n_axes, n_genes)` | **output**, per-axis effect size `log2((mean_case + 1)/(mean_control + 1))`, as in the scalar modules; never centred |
 | `beta_centre` | scalar | `0` none (default); `1` subtract the per-axis median `beta_hat` across genes |
 | `null_method` | scalar | ABI parity only; **must be 0** (see below) |
 | `sampling_mode` | scalar | `0` systematic stride (default); `1` RNG |
@@ -205,31 +233,42 @@ means(n_genes, n_axes)
 | `n_draws_used` | `(n_genes)` | achieved resolution |
 | `var_null` | `(n_axes, n_genes)` | per-axis null variance; the weights, exposed |
 | `neighborhood_size_*` | `(n_axes, n_genes)` | per-axis pool sizes, so a thin axis is visible |
-| `beta_check_cor`, `beta_check_mad` | `(n_axes)` | supplied vs recomputed `beta_hat`; exactly `1` / `0` in internal mode |
 | `delta_hat` | `(n_axes)` | estimated composition shift, reported even when centring is off |
 
 `norm_method`, `k_start`, `k_step`, `k_max`, `tau` and `max_pool_size` keep their current meaning, applied per axis.
 
 **`null_method` is accepted only as 0.** Under this module's construction a draw takes one residual per side, and each neighbour gene contributes exactly `n_rep` residuals to the pool, so "pick a gene uniformly, then a residual within it" is the *same distribution* as "pick a residual uniformly from the pool". A gene-blocked argument would be a no-op that merely looked meaningful, so it is rejected with `ERR_INVALID_INPUT` rather than silently ignored — the same stance `noise_model_exact` takes.
 
-**Thin axes drop the whole gene.** If any axis's pool falls below 10 residuals, or its `beta_hat` is non-finite, the gene is dropped entirely (`pvalues_own = -1`, `method_used = -1`). Dropping only the offending axis would make `D` incomparable between genes and break the magnitude ranking. All axes are gathered and their sizes recorded before that decision, so the failing axis stays identifiable. In practice the gate is not a live concern: `k_start`/`k_step`/`k_max` count **genes**, and 15 genes × 3 replicates already gives 45 residuals.
+**Thin axes drop the whole gene.** If any axis's pool falls below 10 residuals, the gene is dropped entirely (`pvalues_own = -1`, `method_used = -1`). Dropping only the offending axis would make `D` incomparable between genes and break the magnitude ranking. All axes are gathered and their sizes recorded before that decision, so the failing axis stays identifiable. In practice the gate is not a live concern: `k_start`/`k_step`/`k_max` count **genes**, and 15 genes × 3 replicates already gives 45 residuals.
 
-**External `beta_hat` is surfaced, not refused.** With `beta_mode = 1` the internal estimate is still computed and reported against the supplied one: correlation ≈ 1 with a large MAD is a **units** problem (edgeR's `coefficients` are on the natural-log scale, a factor of `ln 2`, and shrunk by default); degraded correlation is shrinkage or non-linearity. Only limma-voom is principled here.
+A non-finite replicate is rejected up front (`validate_all_in_range_real`), so `beta_hat` is always finite.
 
 ### ABI and R entry
 
 C entry `compute_noise_pvalues_pipeline_md_c` — deliberately **not** ABI-compatible with the two scalar entry points. It takes two extra arguments, `n_packed_case` / `n_packed_control`, the declared lengths of the packed buffers, cross-checked in Fortran against the value derived from `n_rep_*_per_axis` (`ERR_DIM_MISMATCH` on a mismatch, rather than reading past the caller's buffer). `enum_max_product` crosses as a `long long`, since the joint space passes 2³¹ at `d = 2` with quite ordinary neighbourhoods.
 
-Rcpp binding `tox_compute_noise_pvalues_pipeline_md_rcpp`; R wrapper `tox_compute_noise_pvalues_pipeline_md()`, which takes **lists of per-axis matrices** (`samples × genes`), derives the per-axis means when not supplied, runs the sample-identifier guard, and returns `pvalues_own`, `d_obs`, `d_std_obs`, `d_sq_null_mean`, `method_used`, `n_draws_used`, `beta_obs`, the three `(n_axes × n_genes)` matrices (`neighborhood_size_case`, `neighborhood_size_control`, `var_null`), `beta_check_cor`, `beta_check_mad`, `delta_hat`, `n_rep_*_per_axis`, `n_success` and `ierr`.
+Rcpp binding `tox_compute_noise_pvalues_pipeline_md_rcpp`; R wrapper `tox_compute_noise_pvalues_pipeline_md(case_replicates, control_replicates, valid_genes_own = NULL, beta_centre = 0L, ...)`. It takes **lists of per-axis matrices** (`samples × genes`) and runs the sample-identifier guard. It returns `pvalues_own`, `d_obs`, `d_std_obs`, `d_sq_null_mean`, `method_used`, `n_draws_used`, `beta_obs`, the three `(n_axes × n_genes)` matrices (`neighborhood_size_case`, `neighborhood_size_control`, `var_null`), `log2fc` (`n_axes × n_genes`), `delta_hat`, `n_rep_*_per_axis`, `n_success` and `ierr`.
 
 Caller-side and still to be done in R: direction `beta_hat/D`, per-axis contribution shares `beta_a²/D²`, and BH over **tested genes only**.
 
 ### Normalisation
 
-To be settled **empirically**, counts vs TPM, on the same dataset with everything else held fixed — not argued from the literature. The counts arm normalises in R (TMM `calcNormFactors`, or median-of-ratios); the TPM arm uses `beta_centre` on the Fortran side. Naming, so the comparison is labelled correctly: what `beta_centre` does is **median centring of log-ratios**, not TMM — TMM's weights come from count magnitudes, which do not exist on TPM. Same estimator family, more robust variant on counts. **`beta_centre` must be off whenever the R side has already normalised**, or the data are centred twice.
+To be settled **empirically**, counts vs TPM, on the same dataset with everything else held fixed — not argued from the literature. The counts arm normalises in R (TMM `calcNormFactors`, or median-of-ratios). The TPM arm uses `beta_centre` on the Fortran side, which all three modules accept. Naming, so the comparison is labelled correctly: what `beta_centre` does is **median centring of log-ratios**, not TMM — TMM's weights come from count magnitudes, which do not exist on TPM. Same estimator family, more robust variant on counts. **`beta_centre` must be off whenever the R side has already normalised**, or the data are centred twice.
 
 Why correct at all: on TPM `log2FC = beta − Δ` with `Δ` identical for every gene, and the null — built from *within-group* residuals — cannot contain information about a *between-group* offset. Running uncorrected is not the assumption-free option; it is the assumption `Δ = 0`. Median centring assumes only that the median gene is unchanged, which is strictly weaker. `delta_hat` is reported either way.
 
 ### Unit tests
 
-`test/mod_test_noise_model_md.f90`, suite `noise_model_md`, 10 tests: the bit-exact `d = 1` enumerated reduction to `noise_model_exact` (both normalization branches, and with `n_case = 4` against `n_ctrl = 5` so it also pins the **per-side** scaling); `compute_beta_md` at `d = 1`; both norms against a hand-computed fixture; the closed-form `Var_null` against the enumerated null's own second moment; the plan's ragged `n_case = [4,6,7,6,5]` / `n_ctrl = [3,5,5,9,3]` fixture with an exactly-known residual variance; `enum_max_product` routing and `method_used`; systematic vs RNG agreement; `beta_centre` median recovery; degenerate input (thin axis, zero-variance axis, `D = 0`, non-finite `beta_hat`, and the validation error codes); and an off-scale supplied `beta_hat`.
+`test/mod_test_noise_model_md.f90`, suite `noise_model_md`, 9 tests:
+
+1. The bit-exact `d = 1` enumerated reduction to `noise_model_exact`. It covers p-values, `beta_obs` and `delta_hat`, on both normalization branches. The fixture uses `n_case = 4` against `n_ctrl = 5`, so it also pins the **per-side** scaling.
+2. The pipeline's own `beta_obs` at `d = 1`, on both branches.
+3. Both norms against a hand-computed fixture.
+4. The closed-form `Var_null` against the enumerated null's own second moment.
+5. The plan's ragged `n_case = [4,6,7,6,5]` / `n_ctrl = [3,5,5,9,3]` fixture, with an exactly-known residual variance.
+6. `enum_max_product` routing and `method_used`.
+7. Systematic vs RNG agreement.
+8. `beta_centre` median recovery. The offset is injected into axis-1 case replicates, and `delta_hat` must recover it while the centred statistic stays unchanged.
+9. Degenerate input: a thin axis, a zero-variance axis, `D = 0` (identical case and control replicates), a NaN replicate (rejected), and the validation error codes.
+
+The scalar suite (`test/mod_test_noise_model.f90`, 9 tests) checks the returned statistic against an independent recomputation on all four normalization regimes. `test_pipeline_beta_centre` checks `delta_hat`, the centring, the agreement of both scalar modules, and the rejection of an unknown mode.

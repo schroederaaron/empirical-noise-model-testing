@@ -373,19 +373,16 @@ compute_noise_pvalues <- function(
 
   n_genes <- nrow(gene_results)
 
-  # Case / control replicate matrices, samples × genes, in PRE-LOG space.
-  cancer_means       <- cancer_preproc$means
+  # Case / control replicate matrices, samples × genes, in PRE-LOG space. The
+  # model computes the per-gene means and the observed statistic from these.
   cancer_replicates  <- cancer_preproc$prelog
-  healthy_means      <- healthy_preproc$means
   healthy_replicates <- healthy_preproc$prelog
 
-  # Observed shift (already in the same log2 coordinate as the null for the
-  # log methods; linear for "raw"). The family/ortholog comparisons have been
-  # retired from the noise model, so only the `own` statistic is passed.
+  # The shift column only still decides WHICH genes are tested (NA = not
+  # testable upstream); the statistic itself is computed inside the model.
   stage_col <- gsub(" ", "_", stage)
-  obs_own  <- gene_results[[paste0("shift_vs_own_healthy_unscaled_", stage_col)]]
-  valid_genes_own  <- as.integer(!is.na(obs_own))
-  obs_own[is.na(obs_own)] <- 0
+  valid_genes_own <- as.integer(!is.na(
+    gene_results[[paste0("shift_vs_own_healthy_unscaled_", stage_col)]]))
 
   # The Fortran only distinguishes linear (0) from log2 (non-zero); "log",
   # "std_log" and "full" all map to non-zero.
@@ -401,11 +398,8 @@ compute_noise_pvalues <- function(
   # post-processing).
   tox_t0 <- Sys.time()
   result <- tox_compute_noise_pvalues_pipeline_exact(
-    case_means         = as.numeric(cancer_means),
     case_replicates    = cancer_replicates,
-    control_means      = as.numeric(healthy_means),
     control_replicates = healthy_replicates,
-    obs_own            = as.numeric(obs_own),
     valid_genes_own    = valid_genes_own,
     norm_method        = norm_method_int,
     k_start            = k_start,
@@ -453,6 +447,7 @@ compute_noise_pvalues <- function(
 
   list(
     pvalues       = pvalues_matrix,
+    log2fc        = setNames(result$log2fc, gene_results$gene_id),  # model effect size
     n_success     = result$n_success,
     neighborhoods = neighborhood_matrix,
     tox_time_secs = tox_elapsed,  # Pure Tensor-Omics call time (no I/O)
@@ -574,6 +569,7 @@ process_single_combination <- function(cancer_type, project_id, norm_method, sta
         signed_difference = shift,
         distance_p_value = dist_p_val,
         noise_p_value = noise_p_val,
+        log2fc = noise_result$log2fc[g],
         family_size = family_size,
         family_mean = family_mean_val,
         neighborhood_size_cancer = n_cancer,

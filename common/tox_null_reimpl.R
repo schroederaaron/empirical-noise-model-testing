@@ -326,15 +326,13 @@ validate_against_fortran <- function(case_mat, ctrl_mat, norm_method,
                                      max_pool_size = 70000L, n_genes_check = 500L) {
   if (!exists("tox_compute_noise_pvalues_pipeline_exact"))
     stop("Load rcpp/tensoromics_functions.R first.")
-  obs <- if (norm_method == 0L) colMeans(case_mat) - colMeans(ctrl_mat)
-         else colMeans(log2(case_mat + 1)) - colMeans(log2(ctrl_mat + 1))
-  obs <- as.numeric(obs); valid <- as.integer(is.finite(obs)); obs[!is.finite(obs)] <- 0
   fres <- tox_compute_noise_pvalues_pipeline_exact(
-    case_means = as.numeric(colMeans(case_mat)), case_replicates = case_mat,
-    control_means = as.numeric(colMeans(ctrl_mat)), control_replicates = ctrl_mat,
-    obs_own = obs, valid_genes_own = valid, norm_method = as.integer(norm_method),
+    case_replicates = case_mat, control_replicates = ctrl_mat,
+    norm_method = as.integer(norm_method),
     k_start = k_start, k_step = k_step, k_max = k_max, tau = tau,
     max_pool_size = max_pool_size)
+  # The R re-implementation is scored against the SAME statistic the Fortran used.
+  obs <- fres$obs_own
   pf <- fres$pvalues_own; pf[pf < 0 | pf > 1] <- NA
 
   sel <- sort(sample.int(ncol(case_mat), min(n_genes_check, ncol(case_mat))))

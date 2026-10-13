@@ -52,7 +52,8 @@ one <- lapply(files, function(f) {
   y <- normLibSizes(DGEList(cnt))
   y <- estimateDisp(y, design = matrix(1, ncol(cnt), 1), prior.df = 0, tagwise = TRUE)
   eff <- y$samples$lib.size * y$samples$norm.factors
-  mu <- rowMeans(sweep(cnt, 2, eff / mean(eff), "/"))            # mean normalised count
+  # 4e7 must be equal to PCFG$lib_size from power_test.R
+  mu <- rowMeans(sweep(cnt, 2, eff / 4e7, "/"))   # mean count per gene at the simulator's depth (lib_size = 4e7)  
   phi <- y$tagwise.dispersion
   ok <- is.finite(phi) & phi > 1e-6                              # drop boundary (Poisson) fits
   label <- if (!is.null(d$project_id)) paste0(d$project_id, "/", d$stage) else basename(f)

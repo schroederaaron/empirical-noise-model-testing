@@ -359,35 +359,15 @@ run_tox <- function(tpm, group, norm_method = 1L, variant = "exact",
   case_rep <- t(tpm[, group == "B", drop = FALSE])
   ctrl_rep <- t(tpm[, group == "A", drop = FALSE])
 
-  # Means place the kNN neighbourhood; they stay LINEAR in both modes.
-  # log2(x+1) is monotone in x, so the ordering is unaffected either way.
-  case_means <- colMeans(case_rep, na.rm = TRUE)
-  ctrl_means <- colMeans(ctrl_rep, na.rm = TRUE)
-
-  # The observed statistic MUST sit on the residual scale.
-  #   norm 0 -> residuals are x - mean(x)                -> linear difference
-  #   norm 1 -> residuals are log2(x+1) - mean(log2(x+1))
-  #             -> difference of FRECHET means, NOT log2(mean(x)+1). The two
-  #             differ by Jensen and the gap grows with the gene's variance,
-  #             i.e. worst exactly where it does most damage.
-  if (norm_method == 0L) {
-    obs_own <- case_means - ctrl_means
-  } else {
-    frechet <- function(m) colMeans(log2(pmax(m, 0) + 1.0), na.rm = TRUE)
-    obs_own <- frechet(case_rep) - frechet(ctrl_rep)
-  }
-  obs_own[!is.finite(obs_own)] <- 0
-
+  # The model computes the kNN means (linear) and the observed statistic on the
+  # residual scale itself: the mean difference for norm 0, the difference of
+  # log2 FRECHET means for norm 1. It is returned as res$obs_own.
   fn <- if (variant == "exact") tox_compute_noise_pvalues_pipeline_exact
         else                    tox_compute_noise_pvalues_pipeline
 
   res <- fn(
-    case_means         = as.numeric(case_means),
     case_replicates    = case_rep,
-    control_means      = as.numeric(ctrl_means),
     control_replicates = ctrl_rep,
-    obs_own            = as.numeric(obs_own),
-    valid_genes_own    = rep(1L, n_genes),
     norm_method        = as.integer(norm_method),
     k_start = kcfg$k_start, k_step = kcfg$k_step,
     k_max   = kcfg$k_max,   tau    = CFG$tox_tau,
@@ -428,7 +408,8 @@ run_tox <- function(tpm, group, norm_method = 1L, variant = "exact",
   pool_infer <- if (is.finite(pmin_obs) && pmin_obs > 0)
                   sqrt(max(0, 1/pmin_obs - 1)) else NA_real_
 
-  data.frame(gene = rownames(tpm), stat = p, padj = padj, lfc = obs_own,
+  data.frame(gene = rownames(tpm), stat = p, padj = padj, lfc = res$obs_own,
+             log2fc = res$log2fc,
              row.names = NULL,
              frac_tested   = mean(tested),
              pool_infer    = pool_infer,

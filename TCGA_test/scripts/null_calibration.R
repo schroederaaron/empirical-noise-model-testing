@@ -390,39 +390,24 @@ pick_split <- function(n, size) {
 #' One TOX run on one A/B split.
 #'
 #' `beta_centre = 1L` subtracts the per-gene MEDIAN of the observed statistic across
-#' genes before scoring -- the composition correction of plan section 6. At d = 1
-#' that is exactly what `noise_model_md`'s `beta_centre` does (its `delta_hat` is the
-#' median of beta over genes), so it is done here in R rather than routed through the
-#' multidimensional entry point: the scalar `exact` module computes the same p-value
-#' in O((n+m) log m) via its sorted-pool binary search, while the d-dimensional module
-#' would have to enumerate or sample the n_pool_case * n_pool_ctrl pairs explicitly.
-#' Same answer, and much faster at the pool sizes this sweep uses.
+#' genes before scoring -- the composition correction of plan section 6. The scalar
+#' modules take the same `beta_centre` flag as `noise_model_md` (identical median,
+#' returned as `delta_hat`), so it is passed straight through; the scalar `exact`
+#' module stays the faster route at d = 1 (O((n+m) log m) via its sorted-pool binary
+#' search, against explicit pair enumeration in the d-dimensional module).
 run_tox_once <- function(raw_mat, norm_method, sp, kcfg = K_GRID[[1]],
                          model = "exact", null_method = 0L, beta_centre = 0L) {
   ng <- ncol(raw_mat)
   pa <- preprocess_replicates(raw_mat[sp$a, , drop = FALSE], norm_method)
   pb <- preprocess_replicates(raw_mat[sp$b, , drop = FALSE], norm_method)
   norm_int <- if (norm_method == "raw") 0L else 1L
-  if (norm_int == 0L) {
-    obs_own <- colMeans(pa$prelog, na.rm = TRUE) - colMeans(pb$prelog, na.rm = TRUE)
-  } else {
-    obs_own <- colMeans(log2(pa$prelog + 1), na.rm = TRUE) -
-               colMeans(log2(pb$prelog + 1), na.rm = TRUE)
-  }
-  obs_own <- as.numeric(obs_own); valid <- as.integer(is.finite(obs_own))
-  # Composition centring, before the non-finite genes are zeroed (they must not
-  # contribute to the median, and `valid` already excludes them from the test).
-  if (isTRUE(beta_centre == 1L)) {
-    delta_hat <- median(obs_own[is.finite(obs_own)])
-    if (is.finite(delta_hat)) obs_own <- obs_own - delta_hat
-  }
-  obs_own[!is.finite(obs_own)] <- 0
   model_fn <- TOX_MODEL_FNS[[model]]
   if (is.null(model_fn)) stop("run_tox_once: unknown model '", model, "'")
+  # The model computes the means and the observed statistic from the replicates,
+  # and does the composition centring itself when beta_centre = 1.
   res <- model_fn(
-    case_means = as.numeric(pa$means), case_replicates = pa$prelog,
-    control_means = as.numeric(pb$means), control_replicates = pb$prelog,
-    obs_own = obs_own, valid_genes_own = valid,
+    case_replicates = pa$prelog, control_replicates = pb$prelog,
+    beta_centre = as.integer(beta_centre),
     norm_method = norm_int, k_start = kcfg$k_start, k_step = kcfg$k_step, k_max = kcfg$k_max,
     tau = TAU, null_method = null_method, max_pool_size = MAX_POOL)
   # A non-zero ierr (e.g. 203 = dimension mismatch) is a wiring error, not "no p-values".

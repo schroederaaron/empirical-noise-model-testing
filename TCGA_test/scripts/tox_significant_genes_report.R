@@ -262,7 +262,9 @@ for (k in keys) {
         # ---- expression, log2 scale (the scale the log model scores on)
         mean_log2_case = unname(sc["mean_log2"]), mean_log2_control = unname(sh["mean_log2"]),
         sd_log2_case = unname(sc["sd_log2"]), sd_log2_control = unname(sh["sd_log2"]),
-        log2FC = unname(sc["mean_log2"] - sh["mean_log2"]),
+        # The model's effect size, log2((mean_case + 1)/(mean_control + 1)); the
+        # log2 Frechet difference is mean_log2_case - mean_log2_control above.
+        log2FC = res$log2fc[i],
         obs_statistic = if (!is.null(dd)) dd$obs else NA_real_,
         direction = if (!is.null(dd)) ifelse(dd$obs > 0, "up", "down")
                     else ifelse(sc["mean_log2"] > sh["mean_log2"], "up", "down"),
