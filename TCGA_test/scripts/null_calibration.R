@@ -216,6 +216,27 @@ TOX_ARMS <- list(
 # Only build the (costly) shared edgeR/limma gene set per cohort if a *-degfilt arm needs it.
 ANY_SHARED_ARM <- any(vapply(TOX_ARMS, function(a) isTRUE(a$shared), logical(1)))
 
+# Variance-matched neighbourhood (implementation notes A "vband" / B "vshrunk";
+# tox_compute_noise_pvalues_pipeline_variance, eval doc §21). The null halves are
+# where c_tau is CHOSEN (note A section 7, step 1), so every c variant runs here, plus
+# note B's checks: robust vs classical scatter for d0 (§5.3) and the LOESS span
+# sensitivity (§5.4, primary arms only). Fixed k = VMATCH_K genes: these arms do not
+# run the K_GRID sweep; their k_config is tagged "k<VMATCH_K>_fixed".
+VMATCH_K <- 50L
+VMATCH_ARMS <- list(
+  list(norm = "log", match = "A", c_tau = 1.0, label = "TOX-log-vband-c1"),
+  list(norm = "log", match = "A", c_tau = 1.5, label = "TOX-log-vband"),
+  list(norm = "log", match = "A", c_tau = 2.0, label = "TOX-log-vband-c2"),
+  list(norm = "log", match = "B", c_tau = 0.5, label = "TOX-log-vshrunk-c0.5"),
+  list(norm = "log", match = "B", c_tau = 1.0, label = "TOX-log-vshrunk"),
+  list(norm = "log", match = "B", c_tau = 2.0, label = "TOX-log-vshrunk-c2"),
+  list(norm = "log", match = "B", c_tau = 1.0, robust_var = FALSE, label = "TOX-log-vshrunk-classicalvar"),
+  list(norm = "log", match = "A", c_tau = 1.5, span = 0.15, label = "TOX-log-vband-span0.15"),
+  list(norm = "log", match = "A", c_tau = 1.5, span = 0.5,  label = "TOX-log-vband-span0.5"),
+  list(norm = "log", match = "B", c_tau = 1.0, span = 0.15, label = "TOX-log-vshrunk-span0.15"),
+  list(norm = "log", match = "B", c_tau = 1.0, span = 0.5,  label = "TOX-log-vshrunk-span0.5")
+)
+
 # ---------------- normalisation comparison: counts vs TPM ----------------
 # Plan section 6 / validation item 12 of md_noise_model_plan_independent_axes.md, run
 # here at d = 1 where it is cheap and directly comparable to everything else in this
@@ -396,11 +417,24 @@ pick_split <- function(n, size) {
 #' module stays the faster route at d = 1 (O((n+m) log m) via its sorted-pool binary
 #' search, against explicit pair enumeration in the d-dimensional module).
 run_tox_once <- function(raw_mat, norm_method, sp, kcfg = K_GRID[[1]],
-                         model = "exact", null_method = 0L, beta_centre = 0L) {
+                         model = "exact", null_method = 0L, beta_centre = 0L, vmatch = NULL) {
   ng <- ncol(raw_mat)
   pa <- preprocess_replicates(raw_mat[sp$a, , drop = FALSE], norm_method)
   pb <- preprocess_replicates(raw_mat[sp$b, , drop = FALSE], norm_method)
   norm_int <- if (norm_method == "raw") 0L else 1L
+  if (!is.null(vmatch)) {
+    # Variance-band arm: fixed k, exact null; kcfg / null_method do not apply.
+    res <- tox_compute_noise_pvalues_pipeline_variance(
+      case_replicates = pa$prelog, control_replicates = pb$prelog,
+      variance_mode = if (vmatch$match == "A") "band" else "shrunk",
+      beta_centre = as.integer(beta_centre), norm_method = norm_int,
+      k = VMATCH_K, c_tau = vmatch$c_tau, loess_span = if (is.null(vmatch$span)) 0.3 else vmatch$span,
+      robust_var = if (is.null(vmatch$robust_var)) TRUE else vmatch$robust_var,
+      max_pool_size = MAX_POOL)
+    if (!is.null(res$ierr) && res$ierr != 0L) stop(sprintf("TOX ierr = %d", res$ierr))
+    p <- res$pvalues_own; p[p < 0 | p > 1] <- NA
+    return(p[!is.na(p)])
+  }
   model_fn <- TOX_MODEL_FNS[[model]]
   if (is.null(model_fn)) stop("run_tox_once: unknown model '", model, "'")
   # The model computes the means and the observed statistic from the replicates,
@@ -585,6 +619,15 @@ run_one_split <- function(s, m_tpm, m_cnt, cname, stage, n_tox, n_cnt, m_tpm_sha
             rws <- c(rws, list(make_row(arm$label, cname, stage, s, n_tox, sp$g, kcfg$name, pval_metrics(pv))))
             pvs <- c(pvs, list(make_pval(arm$label, cname, stage, sp$g, kcfg$name, pv)))
           }
+        }
+      }
+      # Variance-band arms on the SAME split (sp) and the same TOX gene set.
+      if (!is.null(sp)) for (va in VMATCH_ARMS) {
+        kname <- sprintf("k%d_fixed", VMATCH_K)
+        pv <- tox_or_empty(run_tox_once(m_tpm, va$norm, sp, vmatch = va))
+        if (length(pv)) {
+          rws <- c(rws, list(make_row(va$label, cname, stage, s, n_tox, sp$g, kname, pval_metrics(pv))))
+          pvs <- c(pvs, list(make_pval(va$label, cname, stage, sp$g, kname, pv)))
         }
       }
     }
@@ -808,10 +851,36 @@ pv_all <- if (length(pval_pool)) as.data.frame(rbindlist(pval_pool)) else NULL
 # full k grid lives in the CSV, the kNN-sweep table above, and the dedicated kNN plot below.
 REF_K   <- if ("k20_50" %in% summ$k_config) "k20_50" else stats::na.omit(unique(summ$k_config))[1]
 # The normalisation-grid arms get their own plot (below); keep them out of the main ones.
-summ_ref <- summ[(is.na(summ$k_config) | summ$k_config == REF_K) & !is_norm_arm(summ$method), ]
-pv_ref   <- if (!is.null(pv_all)) pv_all[(is.na(pv_all$k_config) | pv_all$k_config == REF_K) &
-                                         !is_norm_arm(pv_all$method), ] else NULL
-ksw_ok   <- !is_norm_arm(summ$method)
+# Variance-band arms: only the two PRIMARY ones (A c = 1.5, B c = 1) enter the main
+# plots, at their fixed k; the c / span / classical-variance variants get their own plot.
+VMATCH_LABELS  <- vapply(VMATCH_ARMS, `[[`, "", "label")
+VMATCH_PRIMARY <- c("TOX-log-vband", "TOX-log-vshrunk")
+is_vmatch      <- function(m) m %in% VMATCH_LABELS
+ref_rows <- function(d) (is.na(d$k_config) | d$k_config == REF_K | d$method %in% VMATCH_PRIMARY) &
+                        !is_norm_arm(d$method) & (!is_vmatch(d$method) | d$method %in% VMATCH_PRIMARY)
+summ_ref <- summ[ref_rows(summ), ]
+pv_ref   <- if (!is.null(pv_all)) pv_all[ref_rows(pv_all), ] else NULL
+ksw_ok   <- !is_norm_arm(summ$method) & !is_vmatch(summ$method)
+
+# VARIANCE-BAND PLOT (notes A/B): FPR at 0.05 of every variance-band arm next to
+# TOX-log (REF_K) and limma, median over the (cancer x stage) cells. This is the
+# step c_tau is chosen on (note A section 7.1); the span arms are note B section 5.4.
+vm_summ <- summ[is_vmatch(summ$method) |
+                (summ$method == "TOX-log" & summ$k_config %in% REF_K) | summ$method == "limma", ]
+if (nrow(vm_summ) && any(is_vmatch(vm_summ$method))) {
+  vm_summ$method <- factor(vm_summ$method, levels = c("limma", "TOX-log", VMATCH_LABELS))
+  p_vm <- ggplot(vm_summ, aes(method, FPR_0.05, colour = factor(n_per_group))) +
+    geom_hline(yintercept = 0.05, colour = "grey50") +
+    stat_summary(fun = median, geom = "point", position = position_dodge(0.6), size = 2) +
+    labs(title = "TCGA null halves: FPR at 0.05 of the variance-band arms (notes A/B)",
+         subtitle = sprintf("median over cancer x stage; TOX-log at %s; band arms at fixed k = %d. Choose c_tau HERE.",
+                            REF_K, VMATCH_K),
+         x = NULL, y = "FPR @ 0.05 (target 0.05)", colour = "reps/group") +
+    theme_minimal(base_size = 9) + theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                                         legend.position = "bottom")
+  tryCatch(ggsave(file.path(PLOT_DIR, "null_variance_band.png"), p_vm, width = 11, height = 6, dpi = 140),
+           error = function(e) NULL)
+}
 
 # NORMALISATION GRID PLOT: inflation at alpha 0.05 and 0.01 per input x TOX arm,
 # median across the (cancer x stage) cells, one column per replicate count.

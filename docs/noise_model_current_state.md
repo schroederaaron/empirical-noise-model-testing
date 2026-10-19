@@ -272,3 +272,96 @@ Why correct at all: on TPM `log2FC = beta − Δ` with `Δ` identical for every 
 9. Degenerate input: a thin axis, a zero-variance axis, `D = 0` (identical case and control replicates), a NaN replicate (rejected), and the validation error codes.
 
 The scalar suite (`test/mod_test_noise_model.f90`, 9 tests) checks the returned statistic against an independent recomputation on all four normalization regimes. `test_pipeline_beta_centre` checks `delta_hat`, the centring, the agreement of both scalar modules, and the rejection of an unknown mode.
+
+## Variance-matched model — `noise_model_variance` (implementation notes A and B)
+
+`src/tox/tox_noise_model_variance.F90` is the exact model with a different **neighbourhood**.
+Each gene's null is built from the `k` nearest genes in mean expression **whose matching variable
+`u` lies within `±tau_var` of the gene's own**: a two-sided variance band. Everything else is
+`noise_model_exact`'s, reused rather than copied: per-side `1/sqrt(n)` scaled residual pools, the
+exact pairwise tail count, the internally computed statistic, `log2fc`, `delta_hat` and
+`beta_centre`. The null stays empirical and non-parametric.
+
+**Matching variable.** It is computed inside the model from the replicates, on
+`L = log2(max(x,0) + 1)` whatever `norm_method` is:
+
+- pooled within-group variance `s2_g` over `d = n_case + n_control − 2` df;
+- `l_g = log(s2_g + 1e-8)`;
+- trend axis `m_g = log2(mean of the linear input over all samples + 1)`;
+- trend: robust LOESS (`span` 0.3, `degree` 1, `family = "symmetric"`, all three exposed). It
+  matches R's `stats::loess` to 5e-15.
+
+`variance_mode` selects how `u` and `tau_var` are built:
+
+| `variance_mode` | `u` | `tau_var` |
+|---|---|---|
+| 1 `"band"` (note A) | `l − S(m)`, the raw detrended log-variance | `c_tau · √ψ₁(d/2)` (0.80 / 0.53 / 0.34 × `c_tau` at n = 3 / 5 / 10 per group) |
+| 2 `"shrunk"` (note B) | `log(s2m / s0sq)`, the limma-style moderated variance over the trend prior | `c_tau · w · √ψ₁(d/2)`, with `w = d/(d + d0)` |
+
+How mode 2 builds `u`:
+
+1. Bias-correct: `e = l − ψ(d/2) + log(d/2)`.
+2. Detrend: `T(m)` is the LOESS of `e` on `m`.
+3. Prior df `d0`: moment matching of the scatter of `e − T` against `ψ₁(d/2)`, inverted with an
+   inverse trigamma.
+4. Prior variance: `s0sq = exp(T + ψ(d0/2) − log(d0/2))`.
+5. Moderate on the VARIANCE scale: `s2m = (d0·s0sq + d·s2)/(d0 + d)`.
+
+The scatter is `mad(r)²` (R's `mad`, MAD constant applied once) or, with `robust_var = 0`, the
+sample variance. With no excess scatter, `d0 = Inf`, `w = 0`, `u = 0` and `tau_var = 1`, and mode 2
+is **exactly** the plain exact model at fixed `k`.
+
+**Neighbourhood** (`gather_residuals_band_helper`):
+
+- Candidates are visited in mean-closeness order: the closest slot first, then the plain models'
+  left/right expansion.
+- A candidate is accepted iff `u` is finite and inside the band.
+- The walk stops at `k` accepted genes, after `BAND_MAX_SCAN_FACTOR · k` (= 20 k) examined slots,
+  when both sides are exhausted, or when the pool is full.
+- `k` is a **fixed** gene count; there is no adaptive growth and no `tau`.
+- A short pool is kept as is; the band is never relaxed. A gene with fewer than
+  `BAND_MIN_GENES` (= 10) accepted genes on either side, or fewer than 10 residuals, gets `p = −1`.
+- The target is normally its own closest neighbour and is in its own pool.
+- The same `u` (pooled variance) selects both the case and the control pool. That is an
+  equal-variance assumption in SELECTION only; the null keeps separate per-side pools.
+
+**API.**
+
+```fortran
+subroutine compute_noise_pvalue_pipeline_variance( &
+    replicates_case, n_genes_case, n_replicates_case, &
+    replicates_control, n_genes_control, n_replicates_control, &
+    compute_pvalue_own, beta_centre, &
+    n_genes, norm_method, variance_mode, k, c_tau, &
+    loess_span, loess_degree, loess_robust, robust_var, max_pool_size, &
+    pvalues_own, observed_statistic_own, log2fc, delta_hat, n_genes_with_pvalue, &
+    neighborhood_size_own_case, neighborhood_size_own_control, &
+    n_scanned_own_case, n_scanned_own_control, &
+    match_u, tau_var, d0, w, scatter, n_floored, ierr)
+```
+
+C entry: `compute_noise_pvalues_pipeline_variance_c`. Rcpp binding:
+`tox_compute_noise_pvalues_pipeline_variance_rcpp`. R wrapper:
+`tox_compute_noise_pvalues_pipeline_variance(case_replicates, control_replicates,
+variance_mode = c("band", "shrunk"), valid_genes_own = NULL, beta_centre = 0L, norm_method = 0L,
+k = 50L, c_tau = NULL, loess_span = 0.3, loess_degree = 1L, loess_robust = TRUE, robust_var = TRUE,
+max_pool_size)`. `c_tau = NULL` gives the notes' primary values: 1.5 for `"band"`, 1.0 for
+`"shrunk"`.
+
+The diagnostics are returned with the p-values:
+
+- `n_scanned_own_*`: candidate genes examined (−1 if not gathered);
+- `match_u`, `tau_var`;
+- `d0` (mode 2; `Inf` means no excess scatter; −1 in mode 1), `w`, `scatter`;
+- `n_floored`: genes at the variance floor.
+
+Unit tests: `test/mod_test_noise_model_variance.f90`, suite `noise_model_variance`, 6 tests.
+
+1. The polygamma helpers and the note-A τ values.
+2. A hand-built band gather: accepted genes and their order, scan count, `scan_max`, a short pool,
+   `max_pool_size`.
+3. Mode 1 with an all-accepting band reproduces the exact model at
+   `k_start = k_step = k_max = k` **exactly**.
+4. Mode 2 without noise heterogeneity gives `d0 = Inf`, `u = 0`, and the same exact reproduction.
+5. A band nothing passes drops every gene.
+6. Argument validation.

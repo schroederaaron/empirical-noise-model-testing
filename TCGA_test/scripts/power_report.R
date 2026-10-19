@@ -37,7 +37,11 @@
 #
 # OUTPUTS (POWER_OUT_DIR)
 #   power_per_round.csv       one row per (job, method); manifest columns included
-#   power_summary.csv         mean / SE over rounds per (cell, method)
+#   power_summary.csv         mean / SE over rounds per (cell, method); the variance-band
+#                             arms add frac_short_pool, n_scanned_median, frac_skipped,
+#                             tau_var, d0 (finite only), d0_inf, w
+#   power_paired_vs_tox.csv   variance-band arms minus their plain TOX comparator, paired
+#                             per round (P+, V: TOX-log; R: TOX-log|TPM-centred)
 #   power_paired_vs_ref.csv   paired per-round difference vs limma
 #   power_fdr_tpr_curve.csv   TPR on an achieved-FDR grid
 #   power_pr_curve.csv        PR curve (interpolated envelope, display only)
@@ -75,7 +79,13 @@ RCFG <- list(
   plot_methods_C = c("limma", "edgeR", "DESeq2", "TOX-log-TPM",
                      "TOX-log-TPM-centred", "TOX-log-TMM"),
   grid_inputs = c("TPM", "TPM-centred", "counts", "counts-centred", "TMM", "MoR"),
-  grid_arms   = c("TOX-log", "TOX-log-blocked", "TOX-raw", "TOX-raw-blocked")
+  grid_arms   = c("TOX-log", "TOX-log-blocked", "TOX-raw", "TOX-raw-blocked"),
+  # Variance-matched arms (implementation notes A/B) and, per part, the plain TOX arm
+  # each is paired against (same input; Part R runs them on TPM-centred).
+  vmatch_methods = c("TOX-log-vband", "TOX-log-vband-c1", "TOX-log-vband-c2",
+                     "TOX-log-vshrunk", "TOX-log-vshrunk-c0.5", "TOX-log-vshrunk-c2",
+                     "TOX-log-vshrunk-classicalvar"),
+  vmatch_comparator = c(`P+` = "TOX-log", V = "TOX-log", R = "TOX-log|TPM-centred")
 )
 dir.create(RCFG$out_dir, showWarnings = FALSE, recursive = TRUE)
 
@@ -148,6 +158,23 @@ pool_diag <- function(man) {
   X <- X[X$gate_ok, ]
   if (!nrow(X)) return(NULL)
   mean_se(X, c(CELL, "is_de"), c(paste0(cols, ".prod"), paste0("d_", cols)))
+}
+
+#' Notes A/B section 7.3: paired per-round differences of every variance-band arm
+#' against the plain TOX arm it replaces (RCFG$vmatch_comparator, same input). The
+#' differences against limma are already in power_paired_vs_ref.csv.
+paired_vs_tox <- function(M) {
+  out <- lapply(names(RCFG$vmatch_comparator), function(pt) {
+    comp <- RCFG$vmatch_comparator[[pt]]
+    d <- M[M$part == pt & M$method %in% c(comp, RCFG$vmatch_methods), ]
+    if (!any(d$method %in% RCFG$vmatch_methods)) return(NULL)
+    x <- paired_vs_ref(d, comp, cols = c("fdr_nom_05", "p_le05_null", "tpr_nom_05", "tpr_ach05",
+                                         "auprc_excess_pe", "lfc80", "fpr_hv05"))
+    if (!is.null(x)) x$comparator <- comp
+    x
+  })
+  out <- Filter(Negate(is.null), out)
+  if (length(out)) do.call(rbind, out)
 }
 
 # =============================================================================
@@ -367,6 +394,49 @@ make_plots <- function(M, CU, PR, ST) {
       th + theme(axis.text.x = element_text(angle = 35, hjust = 1))
     save("variance_only_nulls.png", p, w = 11, h = 6)
   }
+
+  # (10) Variance-matched arms (notes A/B) against limma and their plain comparator.
+  # Methods on x, colour = family, so the 8-slot palette is never exhausted.
+  vm_fam <- function(m) ifelse(m %in% c("limma", RCFG$vmatch_comparator), "reference",
+                        ifelse(grepl("vband", m), "A: vband", "B: vshrunk"))
+  vm_mets <- list(`P+` = c(p_le05_null = "null arm: P(p <= 0.05)", fdr_nom_05 = "FDR @ nominal 0.05",
+                           tpr_ach05 = "TPR @ achieved FDR 0.05", auprc_excess_pe = "AUPRC excess"),
+                  V    = c(fpr_hv05 = "FPR hypervariable nulls", fpr_nonhv05 = "FPR ordinary nulls",
+                           fdr_nom_05 = "FDR @ nominal 0.05", tpr_ach05 = "TPR @ achieved FDR 0.05"),
+                  R    = c(fdr_nom_05 = "FDR @ nominal 0.05", tpr_ach05 = "TPR @ achieved FDR 0.05",
+                           auprc_excess_pe = "AUPRC excess", frac_short_pool = "frac short pool"))
+  vm_keys <- list(`P+` = c("n_rep", "sigma_d"), V = c("n_rep", "het"), R = c("cohort", "n_rep"))
+  for (pt in intersect(names(vm_mets), unique(M$part))) {
+    meth <- c("limma", RCFG$vmatch_comparator[[pt]], RCFG$vmatch_methods)
+    d <- M[M$part == pt & M$method %in% meth, ]
+    if (!any(d$method %in% RCFG$vmatch_methods)) next
+    mets <- vm_mets[[pt]]
+    lg <- do.call(rbind, lapply(names(mets), function(mt) {
+      dd <- if (mt == "p_le05_null") d[d$pi1 == 0, ] else if (pt == "P+") d[d$pi1 > 0, ] else d
+      if (!nrow(dd)) return(NULL)
+      a <- mean_se(dd, c(vm_keys[[pt]], "method"), mt)
+      data.frame(a[c(vm_keys[[pt]], "method")], metric = mets[[mt]],
+                 v = a[[paste0(mt, "_mean")]], se = a[[paste0(mt, "_se")]])
+    }))
+    if (is.null(lg) || !nrow(lg)) next
+    lg$method <- factor(lg$method, levels = meth)
+    lg$family <- vm_fam(as.character(lg$method))
+    lg$cell <- do.call(paste, c(lapply(vm_keys[[pt]], function(k) paste0(k, "=", lg[[k]])), sep = ", "))
+    p <- ggplot(lg, aes(method, v, colour = family)) +
+      geom_pointrange(aes(ymin = v - se, ymax = v + se), size = 0.25) +
+      { if (any(grepl("FDR|P\\(p|FPR", lg$metric)))
+          geom_hline(data = data.frame(metric = unique(grep("FDR|P\\(p|FPR", lg$metric, value = TRUE)), y = 0.05),
+                     aes(yintercept = y), colour = "grey55") } +
+      scale_colour_manual(values = c(reference = PALETTE[1], `A: vband` = PALETTE[2], `B: vshrunk` = PALETTE[3])) +
+      facet_grid(metric ~ cell, scales = "free_y") +
+      labs(title = sprintf("Part %s: variance-matched neighbourhood (notes A/B) vs %s and limma",
+                           pt, RCFG$vmatch_comparator[[pt]]),
+           subtitle = "c_tau is chosen on calibration only (null halves, P+ pi1 = 0); paired differences in power_paired_vs_tox.csv",
+           x = NULL, y = NULL, colour = NULL) +
+      th + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    save(sprintf("variance_match_%s.png", gsub("[^A-Za-z]", "plus", pt)), p,
+         w = max(10, 1.6 * length(unique(lg$cell)) + 4), h = 2.2 * length(mets) + 2)
+  }
 }
 
 # =============================================================================
@@ -465,6 +535,16 @@ if (sys.nframe() == 0L) {
   if (!is.null(ST)) w(mean_se(ST, c(CELL, "method", "stratum_type", "stratum"), c("n", "tpr_nom05", "tpr_ach05")),
                       "power_stratified.csv")
   w(OG, "power_oracle_gap.csv"); w(PD, "power_pool_diag.csv")
+  PT <- tryCatch(paired_vs_tox(M), error = function(e) { message("paired vs TOX: ", conditionMessage(e)); NULL })
+  w(PT, "power_paired_vs_tox.csv")
+  if (!is.null(PT)) {
+    vs <- S[S$method %in% RCFG$vmatch_methods,
+            intersect(names(S), c(CELL, "method", "frac_short_pool_mean", "n_scanned_median_mean",
+                                  "frac_skipped_mean", "tau_var_mean", "d0_mean", "d0_inf_mean", "w_mean"))]
+    message("\nVARIANCE-MATCHED ARMS (notes A/B): pool diagnostics (power_summary.csv) and paired ",
+            "differences vs the plain TOX comparator (power_paired_vs_tox.csv). Choose c_tau on calibration only.")
+    print(vs, row.names = FALSE)
+  }
   w(BK, "power_breakdown.csv"); w(RC, "power_real_checks.csv")
 
   withCallingHandlers(report(S, PV, OG, PD, BK, RC), warning = function(w) {

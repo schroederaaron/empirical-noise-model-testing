@@ -162,6 +162,23 @@ metrics_one <- function(res, is_de, true_lfc, n_de_total, is_hv = NULL, lfc_log2
   for (nb in c("nbhd_own_case", "nbhd_own_control"))
     row[[paste0(nb, "_median")]] <- if (!is.null(res[[nb]]) && any(is.finite(res[[nb]])))
                                       median(res[[nb]], na.rm = TRUE) else NA_real_
+  # Variance-band arms (implementation notes A/B; vb_* columns, NA for every other
+  # method). New columns only -- no existing metric changes.
+  #   frac_short_pool   tested genes whose smaller side pool holds < k genes
+  #   n_scanned_median  candidate genes examined per (case-side) pool
+  #   frac_skipped      kept genes without a p-value (band pool < 10 genes, etc.)
+  #   tau_var, d0, d0_inf, w   the band width and note B's prior df / weight
+  vb <- !is.null(res$vb_k) && any(is.finite(res$vb_k))
+  gmin <- if (vb) pmin(res$vb_genes_case, res$vb_genes_control) else NULL
+  row$frac_short_pool  <- if (vb && any(tested)) mean(gmin[tested] < res$vb_k[1], na.rm = TRUE) else NA_real_
+  row$n_scanned_median <- if (vb && any(is.finite(res$vb_scan_case))) median(res$vb_scan_case, na.rm = TRUE)
+                          else NA_real_
+  row$frac_skipped     <- if (vb) mean(!tested) else NA_real_
+  row$tau_var          <- if (vb) res$vb_tau[1] else NA_real_
+  pos <- function(x) if (vb && is.finite(x) && x >= 0 || (vb && is.infinite(x))) x else NA_real_
+  row$d0               <- pos(if (vb) res$vb_d0[1] else NA_real_)  # Inf = no excess scatter; NA in mode A
+  row$d0_inf           <- if (vb && !is.na(row$d0)) as.numeric(is.infinite(row$d0)) else NA_real_
+  row$w                <- pos(if (vb) res$vb_w[1] else NA_real_)
   as.data.frame(row)
 }
 

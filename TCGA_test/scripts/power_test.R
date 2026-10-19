@@ -47,12 +47,16 @@
 #
 # RAW OUTPUT (PCFG$raw_dir/<part>/; not committed)
 #   results_<job>.csv.gz   one row per (method, gene): p, padj, lfc, log2fc, tie,
-#                          floor_th, nbhd_own_case, nbhd_own_control, lfc_scale
+#                          floor_th, nbhd_own_case, nbhd_own_control, lfc_scale; the
+#                          variance-band arms add vb_u, vb_scan_case/_control,
+#                          vb_genes_case/_control, vb_k, vb_tau, vb_d0, vb_w,
+#                          vb_scatter, vb_n_floored (NA for every other method)
 #   truth_<job>.csv.gz     one row per gene: is_de, true_lfc, expr, kept, is_hv
 #                          (+ realised_lfc in Part R)
 #   diag_<job>.csv.gz      Part Q: pool diagnostics on a gene subset
 #   manifest.csv           one row per job: cell keys, round, seed, Delta, effect-draw
-#                          diagnostics, Part R cohort fields, git commit
+#                          diagnostics, Part R cohort fields, variance-band scalars
+#                          (vb_*: tau, d0, w, ev, scatter, n_floored), git commit
 #   pcfg_dump.txt          the full PCFG of the run
 # =============================================================================
 
@@ -190,6 +194,28 @@ PCFG <- list(
   # "<label>-oracle". Must use input "tpm" or "tmm" (median centring would be
   # computed over a different gene set in the oracle calls).
   oracle_arms = c("TOX-log", "TOX-log-blocked"),
+
+  # Variance-matched neighbourhood (implementation notes A "vband" / B "vshrunk";
+  # tox_compute_noise_pvalues_pipeline_variance, eval doc §21). Exact null, fixed k,
+  # neighbours restricted to a two-sided band on the detrended (A) or shrunk (B)
+  # log-variance. Run ONLY in `parts`: P+ (dispersion scatter), V (hypervariable
+  # genes -- the notes say "Part D", but D is the DESeq2 diagnostic and runs no TOX;
+  # fpr_hv05 lives in V) and R. In Part R they take the comparator's input,
+  # `TOX-log|TPM-centred` (centre = TRUE); elsewhere the comparator is `TOX-log` (TPM).
+  # c_tau is chosen on CALIBRATION only (note A section 7); the c variants are the
+  # notes' sensitivity arms. `parts` on an arm restricts it further.
+  vmatch = list(k = 50L, span = 0.3, degree = 1L, parts = c("P+", "V", "R")),
+  vmatch_arms = list(
+    list(label = "TOX-log-vband",        engine = "variance", norm = 1L, null = 0L, input = "tpm", match = "A", c_tau = 1.5),
+    list(label = "TOX-log-vband-c1",     engine = "variance", norm = 1L, null = 0L, input = "tpm", match = "A", c_tau = 1.0),
+    list(label = "TOX-log-vband-c2",     engine = "variance", norm = 1L, null = 0L, input = "tpm", match = "A", c_tau = 2.0),
+    list(label = "TOX-log-vshrunk",      engine = "variance", norm = 1L, null = 0L, input = "tpm", match = "B", c_tau = 1.0),
+    list(label = "TOX-log-vshrunk-c0.5", engine = "variance", norm = 1L, null = 0L, input = "tpm", match = "B", c_tau = 0.5),
+    list(label = "TOX-log-vshrunk-c2",   engine = "variance", norm = 1L, null = 0L, input = "tpm", match = "B", c_tau = 2.0),
+    # note B section 5.3: do hypervariable genes drive d0? Part R only.
+    list(label = "TOX-log-vshrunk-classicalvar", engine = "variance", norm = 1L, null = 0L, input = "tpm",
+         match = "B", c_tau = 1.0, robust_var = FALSE, parts = "R")
+  ),
   # Part Q pool diagnostics (exact engine, pooled, log): genes per job, and genes
   # the R re-implementation is checked on against the Fortran first.
   diag = list(n_genes = 200L, n_check = 200L),
@@ -516,25 +542,64 @@ run_tox_arm <- function(mat, group, arm, tie, test_only = NULL) {
   if (!is.null(test_only)) valid[-test_only] <- 0L
   centre <- as.integer(isTRUE(arm$centre) || identical(arm$input, "tpm_centred"))
 
-  fn <- if (arm$engine == "exact") tox_compute_noise_pvalues_pipeline_exact
-        else tox_compute_noise_pvalues_pipeline
-  res <- fn(case_replicates = case_rep, control_replicates = ctrl_rep,
-            valid_genes_own = valid, beta_centre = centre,
-            norm_method = arm$norm,
-            k_start = PCFG$kcfg$k_start, k_step = PCFG$kcfg$k_step, k_max = PCFG$kcfg$k_max,
-            tau = PCFG$tau, null_method = arm$null, max_pool_size = PCFG$max_pool)
+  if (arm$engine == "variance") {
+    res <- tox_compute_noise_pvalues_pipeline_variance(
+             case_replicates = case_rep, control_replicates = ctrl_rep,
+             variance_mode = if (arm$match == "A") "band" else "shrunk",
+             valid_genes_own = valid, beta_centre = centre, norm_method = arm$norm,
+             k = PCFG$vmatch$k, c_tau = arm$c_tau,
+             loess_span = PCFG$vmatch$span, loess_degree = PCFG$vmatch$degree,
+             robust_var = arm$robust_var %||% TRUE, max_pool_size = PCFG$max_pool)
+  } else {
+    fn <- if (arm$engine == "exact") tox_compute_noise_pvalues_pipeline_exact
+          else tox_compute_noise_pvalues_pipeline
+    res <- fn(case_replicates = case_rep, control_replicates = ctrl_rep,
+              valid_genes_own = valid, beta_centre = centre,
+              norm_method = arm$norm,
+              k_start = PCFG$kcfg$k_start, k_step = PCFG$kcfg$k_step, k_max = PCFG$kcfg$k_max,
+              tau = PCFG$tau, null_method = arm$null, max_pool_size = PCFG$max_pool)
+  }
   if (!is.null(res$ierr) && res$ierr != 0L) stop(sprintf("TOX ierr = %d", res$ierr))
 
   p <- res$pvalues_own; p[p < 0 | p > 1] <- NA
   padj <- rep(NA_real_, G); padj[!is.na(p)] <- p.adjust(p[!is.na(p)], "BH")
   nc <- res$neighborhood_size_own_case; nt <- res$neighborhood_size_own_control
   # Theoretical per-gene floor where it is known in closed form.
-  floor_th <- if (arm$engine == "exact") ifelse(nc > 0 & nt > 0, 1 / (as.numeric(nc) * nt + 1), NA_real_)
+  floor_th <- if (arm$engine %in% c("exact", "variance"))
+                ifelse(nc > 0 & nt > 0, 1 / (as.numeric(nc) * nt + 1), NA_real_)
               else if (arm$null == 0L) rep(1 / 10001, G) else rep(NA_real_, G)   # N_BOOTSTRAP_DRAWS
-  data.frame(gene = rownames(mat), p = p, padj = padj, lfc = res$obs_own,
-             log2fc = res$log2fc, tie = tie,
-             floor_th = floor_th, nbhd_own_case = nc, nbhd_own_control = nt,
-             lfc_scale = if (arm$norm == 0L) "linear" else "log2", row.names = NULL)
+  out <- data.frame(gene = rownames(mat), p = p, padj = padj, lfc = res$obs_own,
+                    log2fc = res$log2fc, tie = tie,
+                    floor_th = floor_th, nbhd_own_case = nc, nbhd_own_control = nt,
+                    lfc_scale = if (arm$norm == 0L) "linear" else "log2", row.names = NULL)
+  if (arm$engine == "variance") {
+    # Per-gene band diagnostics (vb_*); the scalars are repeated per row so the
+    # report needs no second file. Other methods get NA (bind_methods()).
+    na_neg <- function(x) { x <- as.numeric(x); x[x < 0] <- NA; x }
+    out$vb_u            <- res$match_u
+    out$vb_scan_case    <- na_neg(res$n_scanned_own_case)
+    out$vb_scan_control <- na_neg(res$n_scanned_own_control)
+    out$vb_genes_case    <- na_neg(nc) / nrow(case_rep)     # pool size in GENES
+    out$vb_genes_control <- na_neg(nt) / nrow(ctrl_rep)
+    out$vb_k   <- PCFG$vmatch$k
+    out$vb_tau <- res$tau_var
+    out$vb_d0  <- res$d0
+    out$vb_w   <- res$w
+    out$vb_scatter   <- res$scatter
+    out$vb_n_floored <- res$n_floored
+  }
+  out
+}
+
+#' Row-bind every method's result frame into ONE results table. Methods may carry
+#' extra columns (e.g. the vb_* band diagnostics); missing ones are filled with NA,
+#' so adding a column to one method can never break the write again.
+bind_methods <- function(results) {
+  cols <- unique(unlist(lapply(results, names)))
+  do.call(rbind, Map(function(m, r) {
+    r[setdiff(cols, names(r))] <- NA
+    cbind(method = m, r[cols])
+  }, names(results), results))
 }
 
 #' Oracle pool, computed with the production Fortran.
@@ -641,6 +706,11 @@ run_methods_power <- function(sim, part) {
     }
   }
 
+  # Variance-matched arms (notes A/B). Part R: the comparator's input, TPM-centred.
+  if (RUN_TOX && part %in% PCFG$vmatch$parts)
+    for (a in PCFG$vmatch_arms) if (is.null(a$parts) || part %in% a$parts)
+      safe(a$label, run_tox_arm(tpm, grp, modifyList(a, list(centre = part == "R")), tie))
+
   if (part == "Q" && RUN_TOX) {
     is_null <- !sim$is_de[keep]
     for (a in PCFG$tox_arms) if (a$label %in% PCFG$oracle_arms) {
@@ -720,12 +790,26 @@ run_job <- function(job) {
   if (!is.null(sim$realised_lfc)) truth$realised_lfc <- sim$realised_lfc
   write_gz(truth, f("truth"))
   if (length(rr$results))
-    write_gz(do.call(rbind, Map(function(m, r) cbind(method = m, r), names(rr$results), rr$results)),
-             f("results"))
+    write_gz(bind_methods(rr$results), f("results"))
   if (!is.null(rr$diag)) write_gz(rr$diag, f("diag"))
 
   num <- function(x) if (is.null(x)) NA_real_ else x
-  cbind(job, delta = num(sim$delta), delta_realised = num(sim$delta_realised),
+  # Variance-band scalars of the PRIMARY arms (notes A/B manifest additions). d0, w
+  # and the scatter do not depend on c_tau, so the primary arm stands for its family.
+  vb <- function(lab, col) { r <- rr$results[[lab]]
+    if (is.null(r) || is.null(r[[col]])) NA_real_ else r[[col]][1] }
+  vm_arm <- function(lab) Find(function(a) a$label == lab, PCFG$vmatch_arms) %||% list(c_tau = NA_real_)
+  d_df <- 2 * job$n_rep - 2
+  cbind(job,
+        vb_c_tau_A = vm_arm("TOX-log-vband")$c_tau, vb_tau_A = vb("TOX-log-vband", "vb_tau"),
+        vb_n_floored = vb("TOX-log-vband", "vb_n_floored"),
+        vb_c_tau_B = vm_arm("TOX-log-vshrunk")$c_tau, vb_tau_B = vb("TOX-log-vshrunk", "vb_tau"),
+        vb_d0 = vb("TOX-log-vshrunk", "vb_d0"), vb_w = vb("TOX-log-vshrunk", "vb_w"),
+        vb_scatter_robust = vb("TOX-log-vshrunk", "vb_scatter"),
+        vb_ev = vb("TOX-log-vshrunk", "vb_scatter") - trigamma(d_df / 2),
+        vb_d0_classicalvar = vb("TOX-log-vshrunk-classicalvar", "vb_d0"),
+        vb_span = PCFG$vmatch$span, vb_k = PCFG$vmatch$k,
+        delta = num(sim$delta), delta_realised = num(sim$delta_realised),
         n_de_total = sum(sim$is_de), n_kept = sum(rr$keep), n_methods = length(rr$results),
         eff_lfc_median_abs = num(sim$eff_lfc_median_abs), frac_sign_flip = num(sim$frac_sign_flip),
         frac_below_floor = num(sim$frac_below_floor),
