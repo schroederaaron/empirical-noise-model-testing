@@ -1,0 +1,32 @@
+% F4: one null draw of the multi-dimensional model (tox_noise_model_md.F90).
+% Per axis and per side: a residual pool from that side's own 1-D neighbourhood,
+% already scaled by 1/sqrt(n) of that side. One residual per side per axis.
+\begin{tikzpicture}[font=\scriptsize,
+    pool/.style={draw=#1, fill=#1!12, rounded corners=2pt, minimum width=2.1cm,
+                 minimum height=0.62cm, align=center},
+    box/.style={draw=thbline, fill=thbtint, rounded corners=2pt, align=center, inner sep=4pt},
+    arr/.style={-{Stealth[length=1.8mm]}, thbmuted}]
+  \foreach \a/\name [count=\i] in {1/leaf, 2/stem, 3/root} {
+    \begin{scope}[shift={({(\i-1)*5.0},0)}]
+      \node[font=\footnotesize\bfseries, text=thbink] at (1.2,1.55) {axis \a: \name};
+      \node[pool=casecol] (c\a) at (0,0.75) {case pool\\[-1pt]{\tiny near case mean}};
+      \node[pool=ctrlcol] (t\a) at (2.4,0.75) {control pool\\[-1pt]{\tiny near control mean}};
+      \foreach \x in {-0.8,-0.5,-0.2,0.1,0.4,0.7} \fill[casecol] (\x,0.3) circle (1.3pt);
+      \foreach \x in {1.6,1.9,2.2,2.5,2.8,3.1} \fill[ctrlcol] (\x,0.3) circle (1.3pt);
+      \draw[casecol, thick] (-0.2,0.3) circle (2.6pt);
+      \draw[ctrlcol, thick] (2.5,0.3) circle (2.6pt);
+      \node[box] (v\a) at (1.2,-0.75) {$v_{\a} = \dfrac{\varepsilon^{+}_{\a}}{\sqrt{n^{+}_{\a}}} - \dfrac{\varepsilon^{-}_{\a}}{\sqrt{n^{-}_{\a}}}$};
+      \draw[arr] (-0.2,0.2) -- (v\a.north west);
+      \draw[arr] (2.5,0.2) -- (v\a.north east);
+    \end{scope}
+  }
+  \node[draw=nullcol, fill=nullcol!15, rounded corners=2pt, align=center, inner sep=5pt] (null) at (3.7,-2.35)
+       {null draw:\ $D^2_{\mathrm{std},0} = \sum_a w_a\, v_a^2$,\quad $w_a = 1/\mathrm{Var}_{\mathrm{null}}(a)$};
+  \foreach \a in {1,2,3} \draw[arr] (v\a.south) -- (null.north);
+  \node[draw=obscol, fill=obscol!12, rounded corners=2pt, align=center, inner sep=5pt] (obs) at (11.2,-2.35)
+       {observed:\ $D^2_{\mathrm{std}} = \sum_a w_a\, \hat\beta_a^2$};
+  \node[box, anchor=north] (p) at (7.4,-3.2)
+       {$p = \dfrac{1 + \#\{D^2_{\mathrm{std},0} \ge D^2_{\mathrm{std}}\}}{M + 1}$\quad over $M$ draws (or all combinations)};
+  \draw[arr] (null.south) -- (p.north -| null.south);
+  \draw[arr] (obs.south) -- (p.north -| obs.south);
+\end{tikzpicture}

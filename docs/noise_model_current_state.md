@@ -169,7 +169,7 @@ Because the axes share no samples, drawing each axis independently reproduces th
 
 | `method_used` | path | when |
 |---|---|---|
-| 0 | **enumerated** — walk the joint space, exact tail count, no floor | `∏_a S_a ≤ enum_max_product` |
+| 0 | **enumerated** — walk the joint space, exact tail count, floor `1/(∏_a S_a + 1)` | `∏_a S_a ≤ enum_max_product` |
 | 1 | **systematic** — fixed coprime stride per pool (the default sampler) | otherwise, `sampling_mode = 0` |
 | 2 | **RNG** — classical Monte Carlo | otherwise, `sampling_mode = 1` |
 | 3 | reserved for the convolution null | never produced yet |
@@ -235,7 +235,7 @@ n_rep_per_axis(n_axes)
 | `neighborhood_size_*` | `(n_axes, n_genes)` | per-axis pool sizes, so a thin axis is visible |
 | `delta_hat` | `(n_axes)` | estimated composition shift, reported even when centring is off |
 
-`norm_method`, `k_start`, `k_step`, `k_max`, `tau` and `max_pool_size` keep their current meaning, applied per axis.
+`norm_method`, `k_start`, `k_step`, `k_max`, `tau` and `max_pool_size` keep their current meaning, applied per axis. The R wrapper defaults to `norm_method = 1` (log2), so `D` is in log2FC units by default; `0` gives the linear branch.
 
 **`null_method` is accepted only as 0.** Under this module's construction a draw takes one residual per side, and each neighbour gene contributes exactly `n_rep` residuals to the pool, so "pick a gene uniformly, then a residual within it" is the *same distribution* as "pick a residual uniformly from the pool". A gene-blocked argument would be a no-op that merely looked meaningful, so it is rejected with `ERR_INVALID_INPUT` rather than silently ignored — the same stance `noise_model_exact` takes.
 
@@ -247,9 +247,9 @@ A non-finite replicate is rejected up front (`validate_all_in_range_real`), so `
 
 C entry `compute_noise_pvalues_pipeline_md_c` — deliberately **not** ABI-compatible with the two scalar entry points. It takes two extra arguments, `n_packed_case` / `n_packed_control`, the declared lengths of the packed buffers, cross-checked in Fortran against the value derived from `n_rep_*_per_axis` (`ERR_DIM_MISMATCH` on a mismatch, rather than reading past the caller's buffer). `enum_max_product` crosses as a `long long`, since the joint space passes 2³¹ at `d = 2` with quite ordinary neighbourhoods.
 
-Rcpp binding `tox_compute_noise_pvalues_pipeline_md_rcpp`; R wrapper `tox_compute_noise_pvalues_pipeline_md(case_replicates, control_replicates, valid_genes_own = NULL, beta_centre = 0L, ...)`. It takes **lists of per-axis matrices** (`samples × genes`) and runs the sample-identifier guard. It returns `pvalues_own`, `d_obs`, `d_std_obs`, `d_sq_null_mean`, `method_used`, `n_draws_used`, `beta_obs`, the three `(n_axes × n_genes)` matrices (`neighborhood_size_case`, `neighborhood_size_control`, `var_null`), `log2fc` (`n_axes × n_genes`), `delta_hat`, `n_rep_*_per_axis`, `n_success` and `ierr`.
+Rcpp binding `tox_compute_noise_pvalues_pipeline_md_rcpp`; R wrapper `tox_compute_noise_pvalues_pipeline_md(case_replicates, control_replicates, valid_genes_own = NULL, beta_centre = 0L, norm_method = 1L, ...)`. It takes **lists of per-axis matrices** (`samples × genes`) and runs the sample-identifier guard. It returns `pvalues_own`, `d_obs`, `d_std_obs`, `d_sq_null_mean`, `method_used`, `n_draws_used`, `beta_obs`, the three `(n_axes × n_genes)` matrices (`neighborhood_size_case`, `neighborhood_size_control`, `var_null`), `log2fc` (`n_axes × n_genes`), `delta_hat`, `n_rep_*_per_axis`, `n_success` and `ierr`.
 
-Caller-side and still to be done in R: direction `beta_hat/D`, per-axis contribution shares `beta_a²/D²`, and BH over **tested genes only**.
+Caller-side in R: BH over **tested genes only**. The direction of `beta_hat` is **not** an output: a test of direction needs an angle-based noise model, which is a separate construction and out of scope for this module.
 
 ### Normalisation
 

@@ -1,0 +1,6 @@
+\beamer@sectionintoc {1}{Scientific question}{2}{0}{1}
+\beamer@sectionintoc {2}{Material}{4}{0}{2}
+\beamer@sectionintoc {3}{Methods}{6}{0}{3}
+\beamer@sectionintoc {4}{Data}{16}{0}{4}
+\beamer@sectionintoc {5}{First steps}{18}{0}{5}
+\beamer@sectionintoc {6}{Outlook}{21}{0}{6}

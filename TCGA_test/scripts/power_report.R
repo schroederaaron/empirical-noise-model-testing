@@ -50,6 +50,9 @@
 #   power_pool_diag.csv       Part Q pool diagnostics, oracle - production, paired
 #   power_breakdown.csv       Part C breakdown Delta (FDR@0.05 > 0.10), bootstrap CI
 #   power_real_checks.csv     Part R per-cohort checks
+#   fdr_tpr_curves_vmatch_{vs_ref,all}_{Pplus,V,R}.png
+#                             variance-band arms' TPR-FDR curves vs limma/edgeR/DESeq2,
+#                             and vs every method of the part
 #   *.png
 # =============================================================================
 
@@ -405,7 +408,7 @@ make_plots <- function(M, CU, PR, ST) {
                            fdr_nom_05 = "FDR @ nominal 0.05", tpr_ach05 = "TPR @ achieved FDR 0.05"),
                   R    = c(fdr_nom_05 = "FDR @ nominal 0.05", tpr_ach05 = "TPR @ achieved FDR 0.05",
                            auprc_excess_pe = "AUPRC excess", frac_short_pool = "frac short pool"))
-  vm_keys <- list(`P+` = c("n_rep", "sigma_d"), V = c("n_rep", "het"), R = c("cohort", "n_rep"))
+  vm_keys <- list(`P+` = c("dist", "n_rep", "sigma_d"), V = c("n_rep", "het"), R = c("cohort", "n_rep"))
   for (pt in intersect(names(vm_mets), unique(M$part))) {
     meth <- c("limma", RCFG$vmatch_comparator[[pt]], RCFG$vmatch_methods)
     d <- M[M$part == pt & M$method %in% meth, ]
@@ -436,6 +439,56 @@ make_plots <- function(M, CU, PR, ST) {
       th + theme(axis.text.x = element_text(angle = 45, hjust = 1))
     save(sprintf("variance_match_%s.png", gsub("[^A-Za-z]", "plus", pt)), p,
          w = max(10, 1.6 * length(unique(lg$cell)) + 4), h = 2.2 * length(mets) + 2)
+  }
+
+  # (11) Variance-matched arms: TPR vs achieved FDR curves as in (1), per part. One
+  # figure against the reference tools only, one with every method of the part.
+  # Colour = family (fixed slots, the 8-slot palette is never exceeded), line type =
+  # member of the family; both scales share the method levels, so ggplot merges them
+  # into one legend entry per method.
+  vm_family <- function(m) ifelse(m %in% refs, "reference tools",
+                           ifelse(grepl("vband", m), "A: vband",
+                           ifelse(grepl("vshrunk", m), "B: vshrunk", sub("\\|.*$", "", m))))
+  vm_style <- function(m) {
+    fam <- vm_family(m)
+    lv  <- c("reference tools", "A: vband", "B: vshrunk",
+             setdiff(sort(unique(fam)), c("reference tools", "A: vband", "B: vshrunk")))
+    o <- order(match(fam, lv), m); m <- m[o]; fam <- fam[o]
+    slot <- ave(seq_along(m), fam, FUN = seq_along)
+    list(methods = m, col = setNames(PALETTE[match(fam, lv)], m),
+         lty = setNames(c("solid", "dashed", "dotted", "dotdash", "longdash", "twodash")[slot], m))
+  }
+  vm_fac <- list(`P+` = facet_grid(dist + n_rep ~ sigma_d, labeller = label_both),
+                 V    = facet_grid(het ~ n_rep, labeller = label_both),
+                 R    = facet_wrap(~ cohort + n_rep, labeller = label_both))
+  vm_size <- list(`P+` = c(12, 15), V = c(10, 7), R = c(12, 8))
+  for (pt in intersect(names(vm_fac), unique(CU$part))) {
+    all_m <- unique(CU$method[CU$part == pt])
+    if (!any(all_m %in% RCFG$vmatch_methods)) next
+    for (set in c("vs_ref", "all")) {
+      st <- vm_style(if (set == "vs_ref") intersect(all_m, c(refs, RCFG$vmatch_methods)) else all_m)
+      sel <- function(X) X[X$part == pt & X$method %in% st$methods & (is.na(X$pi1) | X$pi1 > 0), ]
+      cs <- mean_se(sel(CU), c(CELL, "method", "fdr"), "tpr")
+      ms <- mean_se(sel(M), c(CELL, "method"), c("fdr_nom_05", "tpr_nom_05"))
+      cs$method <- factor(cs$method, levels = st$methods)
+      ms$method <- factor(ms$method, levels = st$methods)
+      p <- ggplot(cs, aes(fdr, tpr_mean, colour = method, linetype = method)) +
+        geom_vline(xintercept = 0.05, colour = "grey85", linewidth = 0.3) +
+        geom_line(linewidth = 0.5) +
+        geom_point(data = ms[is.finite(ms$fdr_nom_05_mean), ], aes(fdr_nom_05_mean, tpr_nom_05_mean),
+                   size = 1.6, show.legend = FALSE) +
+        scale_colour_manual(values = st$col, name = NULL) +
+        scale_linetype_manual(values = st$lty, name = NULL) +
+        vm_fac[[pt]] + coord_cartesian(xlim = range(PM$fdr_grid)) +
+        labs(title = sprintf("Part %s: TPR vs achieved FDR, variance-matched arms vs %s", pt,
+                             if (set == "vs_ref") "reference tools" else "every method"),
+             subtitle = paste("Points = BH calls at nominal 0.05 (right of the grey line = FDR not honoured).",
+                              if (pt == "P+") "Null arm (pi1 = 0) has no TPR and is left out." else ""),
+             x = "achieved FDR", y = "TPR (mean over rounds)") +
+        th + theme(legend.key.width = unit(1.8, "lines"))
+      save(sprintf("fdr_tpr_curves_vmatch_%s_%s.png", set, gsub("[^A-Za-z]", "plus", pt)), p,
+           w = vm_size[[pt]][1], h = vm_size[[pt]][2] + if (set == "all") 2 else 0)
+    }
   }
 }
 

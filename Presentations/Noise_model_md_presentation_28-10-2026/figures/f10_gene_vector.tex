@@ -1,0 +1,15 @@
+% Slide 10: one gene as a point per condition in tissue space; beta_hat is the vector
+% from the control mean to the case mean (per axis: mean_case - mean_control). Schematic.
+\begin{tikzpicture}[x={(1cm,0cm)}, y={(0.7cm,0.55cm)}, z={(0cm,1cm)}, font=\scriptsize]
+  \draw[-{Stealth}, thbmuted] (0,0,0) -- (5,0,0) node[anchor=west] {leaf};
+  \draw[-{Stealth}, thbmuted] (0,0,0) -- (0,2.6,0) node[anchor=west] {stem};
+  \draw[-{Stealth}, thbmuted] (0,0,0) -- (0,0,3.6) node[anchor=south] {root};
+  \coordinate (c) at (0.9,1.3,2.3);
+  \coordinate (t) at (3.7,1.5,1.9);
+  \draw[densely dotted, thbmuted] (c) -- (0.9,1.3,0) (t) -- (3.7,1.5,0);
+  \fill[ctrlcol] (c) circle (2.8pt) node[anchor=south, yshift=2pt, text=ctrlcol] {control mean};
+  \fill[casecol] (t) circle (2.8pt) node[anchor=south, yshift=2pt, text=casecol] {case mean};
+  \draw[-{Stealth[length=2.6mm]}, very thick, obscol] (c) -- (t);
+  \node[anchor=north, text=obscol] at ($(c)!0.5!(t)+(0,0,-0.15)$)
+       {$\hat{\boldsymbol\beta} = (\hat\beta_{\mathrm{leaf}}, \hat\beta_{\mathrm{stem}}, \hat\beta_{\mathrm{root}})$};
+\end{tikzpicture}

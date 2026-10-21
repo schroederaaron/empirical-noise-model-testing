@@ -1,0 +1,22 @@
+% F7: first two weeks, shared tasks and parallel tracks (a suggestion; tracks decided on the go)
+\begin{tikzpicture}[font=\scriptsize,
+    task/.style={draw=none, fill=#1, rounded corners=2pt, align=left, inner sep=3.5pt,
+                 text=thbink, anchor=west, minimum height=0.62cm},
+    trk/.style={anchor=east, font=\scriptsize\bfseries, text=thbink, align=right}]
+  % week grid
+  \foreach \w/\x in {1/0,2/6.2} {
+    \node[anchor=south, font=\footnotesize\bfseries, text=thbprimary] at (\x+3.1,0.35) {week \w};
+  }
+  \draw[thbline] (6.1,0.4) -- (6.1,-3.65);
+  \node[trk] at (-0.1,-0.1) {everyone};
+  \node[trk] at (-0.1,-1.15) {Track A\\[-2pt]{\tiny datasets}};
+  \node[trk] at (-0.1,-2.2) {Track B\\[-2pt]{\tiny TOX on TCGA}};
+  \node[trk] at (-0.1,-3.25) {Track C\\[-2pt]{\tiny reference tools}};
+  \node[task=thbtint, text width=5.6cm] at (0,-0.1) {(1) set up R, build TOX, run the example call};
+  \node[task=thbtint, text width=5.6cm] at (6.2,-0.1) {(2) read: normalization, edgeR / limma / DESeq2};
+  \node[task=accentcol!25, text width=11.8cm] at (0,-1.15) {(4) survey candidate multi-tissue datasets $\rightarrow$ one-page comparison against the criteria};
+  \node[task=ctrlcol!18, text width=5.6cm] at (0,-2.2) {(3) explore TCGA: library sizes, filtering, mean--variance};
+  \node[task=ctrlcol!18, text width=5.6cm] at (6.2,-2.2) {(5) reproduce one scalar calibration plot};
+  \node[task=casecol!22, text width=11.8cm] at (0,-3.25) {read on multi-tissue comparisons (omnibus tests, \texttt{fry()}, \texttt{diffSpliceDGE()}, \ldots): what does each test?};
+  \node[anchor=north east, text=thbmuted] at (12.0,-3.75) {end of week 2: everyone runs the pipeline; dataset decision date agreed};
+\end{tikzpicture}

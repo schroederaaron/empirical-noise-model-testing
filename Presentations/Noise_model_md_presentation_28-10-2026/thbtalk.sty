@@ -1,0 +1,687 @@
+%% thbtalk.sty -- a clean, reusable beamer theme for scientific talks
+%% Engine: pdfLaTeX. Aspect ratio: 16:9 (set in \documentclass).
+%% Usage:  \documentclass[aspectratio=169]{beamer}
+%%         \usepackage[lang=en]{thbtalk}
+%%
+%% Options (key=value; an unknown value is an error):
+%%   lang=en|de          built-in labels (default: en); runtime: \thbsetlang{de};
+%%                       add a language with \thbdeclarelang (see "languages" below)
+%%   font=source|lmodern|helvet|none
+%%                       source (default): Source Sans for text, Source Serif for quotes
+%%                       and maths, Source Code for code -- the fonts of the design
+%%   notes=none|second|only
+%%                       speaker notes: off, on a second screen, or a notes-only PDF
+%%   nodots              hide the section navigation dots
+%%   nofooter            hide the footer line
+%%   nonumbers           hide slide numbers
+%%   nosectionslides     do not auto-insert a slide at each \section
+%%
+%% Colours: redefine after loading, e.g.
+%%   \definecolor{thbprimary}{HTML}{004E9E}
+%%   \definecolor{thbaccent}{HTML}{78B833}
+%%
+%% The look follows a 1920 x 1080 px design mock-up; every size below is given in its
+%% pixels (\thb@px), so it can be checked against the design line by line.
+%% All commands are described in README.md. After changing this file, run
+%% python3 test/check.py: it verifies that no slide looks different.
+
+\NeedsTeXFormat{LaTeX2e}[2020/10/01]   % for \NewDocumentEnvironment with a +b argument
+\ProvidesPackage{thbtalk}[2026/09/19 v2.0 Scientific talk theme for beamer]
+
+\RequirePackage{kvoptions}
+\SetupKeyvalOptions{family=thb,prefix=thb@}
+\DeclareStringOption[en]{lang}
+\DeclareStringOption[source]{font}
+\DeclareBoolOption{nodots}
+\DeclareBoolOption{nofooter}
+\DeclareBoolOption{nonumbers}
+\DeclareBoolOption{nosectionslides}
+\DeclareStringOption[none]{notes}
+\ProcessKeyvalOptions*
+
+\RequirePackage{keyval}
+\RequirePackage{etoolbox}
+\RequirePackage{ifthen}
+\RequirePackage{xcolor}
+\RequirePackage{graphicx}
+\RequirePackage{booktabs}
+\RequirePackage{array}
+\RequirePackage{listings}
+\RequirePackage{amsmath,amssymb}
+\RequirePackage{tikz}
+\RequirePackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\RequirePackage{algpseudocode}
+\RequirePackage{tcolorbox}
+\tcbuselibrary{skins,listings}
+
+% ----------------------------------------------------------- design units ---
+% One pixel of the 1920 px wide design. Beamer's 16:9 page is 160 mm wide, so 1 px = 0.236 pt.
+\newlength{\thb@px}
+\setlength{\thb@px}{\dimexpr\paperwidth/1920\relax}
+
+% \thb@fontsize{<size in px>}[<line height as a multiple of the size>]
+% Without a line height it uses the browser's "normal" one for Source Sans, 1.424.
+\newcommand{\thb@lineheight}{1.424}
+\NewDocumentCommand{\thb@fontsize}{m O{1.424}}{%
+  \def\thb@lineheight{#2}%
+  \fontsize{#1\thb@px}{#2\dimexpr#1\thb@px\relax}\selectfont}
+
+% Line boxes as in the browser. A browser gives each line of text a box of <line height> x
+% <size>, whatever glyphs it holds: with Source Sans the baseline sits 1.024 em below the
+% top of a "normal" 1.424 em box, and a different line height adds or removes space evenly
+% above and below. \thb@strut makes a TeX line exactly that tall. Between lines built with
+% it (\thb@line), \thb@gap{<px>} is the design's CSS margin, taken over unchanged.
+% In a box whose content comes from the user, \thb@firststrut puts a line box at the start of
+% its first paragraph and \thb@laststrut one at the end of its last, so the padding is the
+% design's.
+\newcommand{\thb@strut}{\vrule width\z@
+  height\dimexpr 1.024em-0.5\dimexpr 1.424em-\thb@lineheight em\relax\relax
+  depth\dimexpr 0.4em-0.5\dimexpr 1.424em-\thb@lineheight em\relax\relax}
+\newcommand{\thb@line}[1]{\leavevmode\thb@strut#1\thb@strut\par}
+\newcommand{\thb@gap}[1]{\par\nointerlineskip\vspace{#1\thb@px}}
+\newcommand{\thb@firststrut}{\everypar{\thb@strut\everypar{}}}
+\newcommand{\thb@laststrut}{\ifhmode\thb@strut\fi}
+
+% \thb@min{<length>}{<length>}: the smaller one; the design caps some boxes at a width
+\newcommand{\thb@min}[2]{\ifdim#1<#2 #1\else#2\fi}
+
+% ---------------------------------------------------------- choice values ---
+% Each value of a choice (notes=, font=, lang=) is one macro \thb@<choice>@<value>.
+% \thb@choose runs it. A value without a macro is a typo and stops with an error,
+% instead of silently falling back to a default.
+\newcommand{\thb@choose}[2]{%
+  \ifcsname thb@#1@#2\endcsname
+    \csname thb@#1@#2\endcsname
+  \else
+    \PackageError{thbtalk}{Unknown #1 `#2'}%
+      {The known values are listed at the top of thbtalk.sty.}%
+  \fi}
+
+\@namedef{thb@notes@none}{}
+\@namedef{thb@notes@second}{\setbeameroption{show notes on second screen=right}}
+\@namedef{thb@notes@only}{\setbeameroption{show only notes}}
+\thb@choose{notes}{\thb@notes}
+
+% \thb@mediumseries: the weight of code keywords; only the Source fonts have a medium weight
+\newcommand{\thb@mediumseries}{\bfseries}
+\@namedef{thb@font@source}{%
+  \RequirePackage[T1]{fontenc}%
+  \RequirePackage{lmodern}%          scalable maths symbols; its text fonts are replaced next
+  \RequirePackage{sourceserifpro}%   roman: quotes, maths letters and digits
+  \RequirePackage{sourcecodepro}%    typewriter: code, placeholders
+  \RequirePackage{sourcesanspro}%    sans: everything else (beamer sets text in sans)
+  \renewcommand{\thb@mediumseries}{\fontseries{mb}\selectfont}%
+  % Maths in Source Serif italic, as in the design. mathastext takes the font that is the
+  % document default while it loads, so switch the default to roman for that moment.
+  \usefonttheme{professionalfonts}%
+  \let\thb@textfamily\familydefault
+  \renewcommand{\familydefault}{\rmdefault}%
+  \RequirePackage[italic,nominus]{mathastext}%   minus from the maths font
+  \let\familydefault\thb@textfamily}
+% none: fonts are left to the document. They must scale to any size (like lmodern), since
+% the design's sizes lie between the fixed sizes of Computer Modern.
+\@namedef{thb@font@none}{}
+\@namedef{thb@font@helvet}{%
+  \RequirePackage[T1]{fontenc}\RequirePackage{lmodern}\RequirePackage{helvet}%
+  \renewcommand{\familydefault}{\sfdefault}}
+\@namedef{thb@font@lmodern}{\RequirePackage[T1]{fontenc}\RequirePackage{lmodern}}
+\thb@choose{font}{\thb@font}
+
+% ------------------------------------------------------------- type scale ---
+% LaTeX's size commands carry the design's sizes, so text written in a slide (\small,
+% \large, ...) uses the same scale as the package's own elements.
+%   \tiny 20  \scriptsize 24 (footer)  \footnotesize 28 (glosses, sources)  \small 30
+%   \normalsize 34 (body)  \large 40  \Large 44 (quotes)  \LARGE 58 (frame titles)
+%   \huge 74 (slide titles)  \Huge 90
+% \thb@definesize{<command>}{<size px>}{<line height as a multiple of the size>}
+\newcommand{\thb@definesize}[3]{\renewcommand#1{\def\thb@lineheight{#3}%
+  \@setfontsize#1{#2\thb@px}{#3\dimexpr#2\thb@px\relax}}}
+\thb@definesize{\tiny}{20}{1.3}
+\thb@definesize{\scriptsize}{24}{1.3}
+\thb@definesize{\footnotesize}{28}{1.3}
+\thb@definesize{\small}{30}{1.3}
+\thb@definesize{\large}{40}{1.3}
+\thb@definesize{\Large}{44}{1.35}
+\thb@definesize{\LARGE}{58}{1.15}
+\thb@definesize{\huge}{74}{1.12}
+\thb@definesize{\Huge}{90}{1.12}
+% Lists: bullet 3 px in from the margin, text 41 px in, 25 px between items, 8 px above and below
+\setlength{\leftmargini}{41\thb@px}
+\def\@listI{\leftmargin\leftmargini\labelsep 25\thb@px\topsep 8\thb@px\partopsep\z@
+  \parsep\z@\itemsep 25\thb@px}
+\renewcommand{\normalsize}{\def\thb@lineheight{1.35}%
+  \@setfontsize\normalsize{34\thb@px}{1.35\dimexpr34\thb@px\relax}%
+  \abovedisplayskip 16\thb@px\@plus 4\thb@px\@minus 8\thb@px
+  \abovedisplayshortskip\z@\@plus 4\thb@px
+  \belowdisplayshortskip 8\thb@px\@plus 4\thb@px\@minus 4\thb@px
+  \belowdisplayskip\abovedisplayskip
+  \let\@listi\@listI}
+\normalsize
+
+% ---------------------------------------------------------------- palette ---
+% TH Bingen house colours. Swap these two lines for any other institution.
+\definecolor{thbprimary}{HTML}{004E9E}   % deep institutional blue
+\definecolor{thbaccent} {HTML}{78B833}   % signal green
+\definecolor{thbink}    {HTML}{1B1E23}
+\definecolor{thbmuted}  {HTML}{6E7781}
+\definecolor{thbline}   {HTML}{D8DEE5}
+\definecolor{thbtint}   {HTML}{EEF3F8}
+\definecolor{thbcodebg} {HTML}{F5F7FA}
+
+% ------------------------------------------------------------ base layout ---
+\usetheme{default}
+\usecolortheme{default}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{enumerate items}[default]
+\setbeamertemplate{caption}{\raggedright\insertcaption\par}
+\setbeamertemplate{theorems}[numbered]
+\setbeamercovered{transparent=18}
+\beamer@centeredfalse   % slide content starts under the title (beamer's class option t)
+
+% Bullets: filled circles, 13 px, centred on the x-height
+\newcommand{\thb@bullet}[1]{%
+  \raisebox{\dimexpr0.5ex-6.5\thb@px}{\tikz{\fill[#1] (0,0) circle (6.5\thb@px);}}}
+\setbeamertemplate{itemize item}{\usebeamercolor[fg]{itemize item}\thb@bullet{itemize item.fg}}
+\setbeamertemplate{itemize subitem}{\usebeamercolor[fg]{itemize subitem}\thb@bullet{itemize subitem.fg}}
+\setbeamertemplate{itemize subsubitem}{\usebeamercolor[fg]{itemize subitem}\thb@bullet{itemize subitem.fg}}
+
+\newlength{\thbmargin}\setlength{\thbmargin}{106\thb@px}
+\setbeamersize{text margin left=\thbmargin,text margin right=\thbmargin}
+
+\setbeamercolor{normal text}{fg=thbink,bg=white}
+\setbeamercolor{structure}{fg=thbprimary}
+\setbeamercolor{alerted text}{fg=thbaccent}
+\setbeamercolor{title}{fg=thbink}
+\setbeamercolor{subtitle}{fg=thbmuted}
+\setbeamercolor{author}{fg=thbink}
+\setbeamercolor{institute}{fg=thbmuted}
+\setbeamercolor{date}{fg=thbmuted}
+\setbeamercolor{frametitle}{fg=thbink}
+\setbeamercolor{framesubtitle}{fg=thbmuted}
+\setbeamercolor{footline}{fg=thbmuted}
+\setbeamercolor{headline}{fg=thbmuted}
+\setbeamercolor{itemize item}{fg=thbprimary}
+\setbeamercolor{itemize subitem}{fg=thbaccent}
+\setbeamercolor{enumerate item}{fg=thbprimary}
+\setbeamercolor{caption name}{fg=thbmuted}
+\setbeamercolor{bibliography item}{fg=thbprimary}
+\setbeamercolor{bibliography entry author}{fg=thbink}
+\setbeamercolor{bibliography entry title}{fg=thbmuted}
+
+\setbeamerfont{title}{size=\thb@fontsize{74}[1.12],series=\bfseries}
+\setbeamerfont{subtitle}{size=\thb@fontsize{38},series=\mdseries}
+\setbeamerfont{author}{size=\thb@fontsize{34}}
+\setbeamerfont{institute}{size=\thb@fontsize{28}}
+\setbeamerfont{date}{size=\thb@fontsize{28}}
+\setbeamerfont{frametitle}{size=\thb@fontsize{58},series=\bfseries}
+\setbeamerfont{framesubtitle}{size=\thb@fontsize{30},series=\mdseries}
+\setbeamerfont{footline}{size=\thb@fontsize{24}}
+\setbeamerfont{caption}{size=\small}
+\setbeamerfont{block title}{size=\thb@fontsize{30},series=\bfseries}
+\setbeamerfont{block body}{size=\normalsize}
+
+% ------------------------------------------------------------------ boxes ---
+% Every box of the package is a tcolorbox with these padding-free basics. The frame is never
+% drawn: even at zero width it leaves an antialiased seam around the box.
+\tcbset{thb/box/.style={enhanced, frame hidden, boxrule=0pt, arc=0pt, outer arc=0pt,
+    boxsep=0pt, left=0pt, right=0pt, top=0pt, bottom=0pt,
+    before skip=20\thb@px, after skip=20\thb@px},
+  % thb/left rule={<width>}{<colour>}: a coloured rule along the left edge
+  thb/left rule/.style 2 args={leftrule=#1,
+    overlay={\fill[#2] (frame.north west) rectangle ([xshift=#1]frame.south west);}}}
+
+% Blocks (block, alertblock, exampleblock, takeaway, pseudocode): a coloured header bar over
+% a tinted body, 8 px corners. The colours come from beamer's block colours.
+% \thb@blockmax caps the width; takeaway and pseudocode set it, as in the design.
+% \thb@blockskip is the space above; the takeaway box sets a larger one.
+\newlength{\thb@blockmax}\setlength{\thb@blockmax}{\maxdimen}
+\newcommand{\thb@blockskip}{20\thb@px}
+\newcommand{\thb@blockbegin}[2]{% #1 title colour, #2 body colour
+  \par
+  \usebeamercolor{#1}\usebeamercolor{#2}%
+  \sbox0{\insertblocktitle}%
+  \begin{tcolorbox}[thb/box, arc=8\thb@px, width=\thb@min{\thb@blockmax}{\linewidth},
+      before skip=\thb@blockskip,
+      colback=#2.bg, coltext=#2.fg, colbacktitle=#1.bg, coltitle=#1.fg,
+      fonttitle=\usebeamerfont*{block title}, titlerule=0pt,
+      lefttitle=24\thb@px, righttitle=24\thb@px, toptitle=12\thb@px, bottomtitle=12\thb@px,
+      left=24\thb@px, right=24\thb@px, top=22\thb@px, bottom=22\thb@px,
+      \ifdim\wd0>\z@ title={\thb@strut\insertblocktitle\thb@strut},\fi
+      before upper={\usebeamerfont{block body}\thb@firststrut}, after upper=\thb@laststrut]}
+\newcommand{\thb@blockend}{\end{tcolorbox}}
+\setbeamertemplate{block begin}{\thb@blockbegin{block title}{block body}}
+\setbeamertemplate{block end}{\thb@blockend}
+\setbeamertemplate{block alerted begin}{\thb@blockbegin{block title alerted}{block body alerted}}
+\setbeamertemplate{block alerted end}{\thb@blockend}
+\setbeamertemplate{block example begin}{\thb@blockbegin{block title example}{block body example}}
+\setbeamertemplate{block example end}{\thb@blockend}
+
+\setbeamercolor{block title}{fg=white,bg=thbprimary}
+\setbeamercolor{block body}{fg=thbink,bg=thbtint}
+\setbeamercolor{block title alerted}{fg=white,bg=thbaccent}
+\setbeamercolor{block body alerted}{fg=thbink,bg=thbtint}
+\setbeamercolor{block title example}{fg=white,bg=thbmuted}
+\setbeamercolor{block body example}{fg=thbink,bg=thbtint}
+
+% ------------------------------------------------------------- languages ---
+% Every label the package prints is \thbname@<label>. A language sets them by key:
+%   \thbdeclarelang{fr}{outline=Plan, questions=Questions~?, ...}
+%   \thbsetlang{fr}
+% Labels a language leaves out keep their English text. An unknown label is an error.
+\newcommand{\thb@labels}{outline,takeaway,refs,backup,thanks,questions,figure,recap,where}
+\newcommand{\thb@definelabelkey}[1]{\define@key{thb@label}{#1}{\@namedef{thbname@#1}{##1}}}
+\@for\thb@label:=\thb@labels\do{\expandafter\thb@definelabelkey\expandafter{\thb@label}}
+
+% \thblabel{<label>}: the text of a label in the current language, for use in slides, e.g.
+%   \begin{frame}{\thblabel{refs}}   or   \thbclosingframe[\thblabel{thanks}]
+\DeclareRobustCommand{\thblabel}[1]{%
+  \ifcsname thbname@#1\endcsname
+    \csname thbname@#1\endcsname
+  \else
+    \PackageError{thbtalk}{Unknown label `#1'}{The labels are: \thb@labels.}%
+  \fi}
+
+\newcommand{\thbdeclarelang}[2]{\@namedef{thb@lang@#1}{\setkeys{thb@label}{#2}}}
+\newcommand{\thbsetlang}[1]{\thb@lang@en\thb@choose{lang}{#1}}
+
+\thbdeclarelang{en}{%
+  outline=Outline, takeaway=Takeaway, refs=References, backup=Backup, thanks=Thank you,
+  questions=Questions?, figure=Fig., recap=Takeaways, where=Where we are}
+\thbdeclarelang{de}{%
+  outline=Gliederung, takeaway=Kernaussage, refs=Literatur, backup=Anhang,
+  thanks=Vielen Dank, questions=Fragen?, figure=Abb., recap=Zum Mitnehmen,
+  where=Wo wir stehen}
+\thbsetlang{\thb@lang}
+
+% ------------------------------------------------------- title-page data ---
+\def\thb@venue{}
+\newcommand{\thbvenue}[1]{\def\thb@venue{#1}}
+\def\thb@contact{}
+\newcommand{\thbcontact}[1]{\def\thb@contact{#1}}
+\def\thb@logofile{}
+\def\thb@logotext{}
+\newcommand{\thblogo}[1]{\def\thb@logofile{#1}}      % image file, title page only
+\newcommand{\thblogotext}[1]{\def\thb@logotext{#1}}  % text wordmark fallback
+
+\newcommand{\thb@logobox}{%
+  \ifx\thb@logofile\empty
+    \ifx\thb@logotext\empty\else
+      {\color{thbprimary}\bfseries\thb@fontsize{40}\thb@logotext}%
+    \fi
+  \else
+    \includegraphics[height=0.085\paperheight]{\thb@logofile}%
+  \fi}
+
+% -------------------------------------------------------- building blocks ---
+% \thb@accentbar{<width px>}{<height px>}: the short green bar; 70x7 over slide titles,
+% 56x6 under frame titles, 62x6 under a headline number
+\newcommand{\thb@accentbar}[2]{{\color{thbaccent}\rule{#1\thb@px}{#2\thb@px}}}
+
+% Big white slide title with its bar, on the dark slides
+\newcommand{\thb@darktitle}[1]{%
+  \thb@accentbar{70}{7}\thb@gap{26}%
+  {\color{white}\usebeamerfont{title}\thb@fontsize{74}\thb@line{#1}}}
+
+% "Author · Institute" and the optional contact line on the closing slides
+\newcommand{\thb@signature}{%
+  {\color{thbtint}\thb@fontsize{30}%
+   \thb@line{\insertauthor\ \textperiodcentered\ \insertinstitute}%
+   \ifx\thb@contact\empty\else\thb@gap{10}\thb@line{\thb@contact}\fi}}
+
+% Slides the package builds itself use beamer's command form \frame[<options>]{<body>},
+% which is what \begin{frame}...\end{frame} turns into anyway. The body is an ordinary
+% argument, so it may contain any conditional or environment. Written as
+% \begin{frame}...\end{frame} inside a macro, beamer has to find \end{frame} by scanning,
+% which breaks when an \if...\fi spans an \end{...} or when an environment splits the
+% frame across its begin and end code.
+% A body that starts with {...} would be taken as the frame title, hence the \relax.
+
+% \thb@vfill: like \vfill, but one order stronger than the fill glue beamer puts at the top and
+% bottom of every frame, so what sits between two of them is centred exactly, and what
+% follows one alone goes to the very bottom.
+\newcommand{\thb@vfill}{\vskip\z@\@plus 1filll\relax}
+
+% \thb@darkslide{<body>}: slide in the primary colour, no header or footer
+\newcommand{\thb@darkslide}[1]{%
+  {\setbeamercolor{background canvas}{bg=thbprimary}%
+   \frame[plain,c]{\relax#1}}}
+
+% ------------------------------------------------------------- furniture ---
+% Header: one 14 px square per section of the current part, 12 px apart, right-aligned;
+% the current section's square in the primary colour. The row keeps its height when
+% there are no squares, so frame titles always sit at the same place.
+\newcommand{\thb@navsquare}[1]{{\color{#1}\rule{14\thb@px}{14\thb@px}}}
+\setbeamertemplate{section in head/foot}{\thb@navsquare{thbprimary}}
+\setbeamertemplate{section in head/foot shaded}{\thb@navsquare{thbline}}
+\newcommand{\thb@sectiondots}{%
+  {\def\slideentry##1##2##3##4##5##6{}%
+   \def\sectionentry##1##2##3##4##5{% number, title, page, short title, part
+     \ifnum##5=\c@part
+       \hspace{12\thb@px}%
+       \hyperlink{Navigation##3}{\ifnum\c@section=##1
+         \usebeamertemplate{section in head/foot}\else
+         \usebeamertemplate{section in head/foot shaded}\fi}%
+     \fi}%
+   \dohead}}
+\setbeamertemplate{headline}{%
+  \begin{beamercolorbox}[wd=\paperwidth,ht=40\thb@px,dp=0pt,%
+      leftskip=\thbmargin,rightskip=\thbmargin]{headline}%
+    \ifthb@nodots\else\ifnum\c@section>0\relax\hfill\thb@sectiondots\fi\fi
+  \end{beamercolorbox}}
+
+\setbeamertemplate{footline}{%
+  \ifthb@nofooter\else
+    \begin{beamercolorbox}[wd=\paperwidth,ht=30\thb@px,dp=37\thb@px,%
+        leftskip=\thbmargin,rightskip=\thbmargin]{footline}%
+      \usebeamerfont{footline}%
+      \thb@venue\hfill\insertshortauthor\hfill
+      \ifthb@nonumbers\else\insertframenumber\fi
+    \end{beamercolorbox}%
+  \fi}
+
+% ------------------------------------------------------------ title page ---
+% Logo row at the top (70 px padding), the text block centred in the space below it,
+% at most 1400 px wide, 60 px padding at the bottom
+\setbeamertemplate{title page}{%
+  \vspace*{70\thb@px}%
+  {\thb@fontsize{40}\leavevmode\hfill\thb@strut\thb@logobox\par}
+  \thb@vfill
+  \begin{minipage}{\thb@min{1400\thb@px}{\linewidth}}
+    \raggedright
+    \thb@accentbar{70}{7}\thb@gap{28}%
+    {\usebeamerfont{title}\usebeamercolor[fg]{title}\thb@line{\inserttitle}}%
+    \ifx\insertsubtitle\@empty\else
+      \thb@gap{16}{\usebeamerfont{subtitle}\usebeamercolor[fg]{subtitle}\thb@line{\insertsubtitle}}%
+    \fi
+    \thb@gap{64}{\usebeamerfont{author}\usebeamercolor[fg]{author}\thb@line{\insertauthor}}%
+    \thb@gap{10}{\usebeamerfont{institute}\usebeamercolor[fg]{institute}\thb@line{\insertinstitute}}%
+    \thb@gap{20}{\usebeamerfont{date}\usebeamercolor[fg]{date}%
+      \thb@line{\insertdate\ifx\thb@venue\empty\else\ \textperiodcentered\ \thb@venue\fi}}%
+  \end{minipage}
+  \thb@vfill
+  \vspace*{60\thb@px}}
+
+\newcommand{\thbtitleframe}{\frame[plain,c]{\titlepage}}
+
+% ------------------------------------------------------- section slides ---
+% Left: section number, bar and title. Right, behind a thin white rule: all sections,
+% the current one in white, the others at 55 %.
+\newcommand{\thb@twodigit}[1]{\ifnum#1<10 0\fi\number#1}
+\newcommand{\thb@sectionslideentry}[1]{% #1 colour
+  \ifnum\inserttocsectionnumber>1 \thb@gap{20}\fi
+  {\color{#1}\thb@fontsize{32}\thb@line{\inserttocsection}}}
+\newcommand{\thb@sectionframe}{%
+  {\setbeamertemplate{section in toc}{\thb@sectionslideentry{white}}%
+   \setbeamertemplate{section in toc shaded}{\thb@sectionslideentry{white!55!thbprimary}}%
+   \setbeamertemplate{subsection in toc}{}%
+   \thb@darkslide{%
+     \thb@vfill
+     \begin{columns}[c,onlytextwidth]
+       \begin{column}{1060\thb@px}
+         {\color{thbaccent}\bfseries\thb@fontsize{150}[0.9]\thb@line{\thb@twodigit{\value{section}}}}%
+         \thb@gap{34}%
+         \thb@darktitle{\insertsectionhead}
+       \end{column}\hfill
+       \begin{column}{558\thb@px}
+         \hbox{{\color{white!28!thbprimary}\vrule width 2\thb@px}\hspace{40\thb@px}%
+           \parbox[c]{516\thb@px}{\thb@toc{currentsection,hideallsubsections,sectionstyle=show/shaded}}}
+       \end{column}
+     \end{columns}
+     \thb@vfill}}}
+\AtBeginSection[]{\ifthb@nosectionslides\else\thb@sectionframe\fi}
+
+% ----------------------------------------------------------- outline slide ---
+\newcommand{\thboutlinenote}[2]{\@namedef{thb@note@#1}{#2}}
+\newcommand{\thb@note}[1]{%
+  \ifcsname thb@note@#1\endcsname\csname thb@note@#1\endcsname\fi}
+\newif\ifthb@tocnotes\thb@tocnotestrue
+\newif\ifthb@tocrules\thb@tocrulestrue
+
+% \thboutline            single column, all subsections
+% \thboutline[4]         two columns, break after section 4 (for long talks)
+% \thboutlinecompact     titles only: no glosses, no subsections, no rules
+\newcommand{\thboutline}[1][0]{\thb@outlineslide{#1}{}}
+\newcommand{\thboutlinecompact}[1][0]{%
+  {\thb@tocnotesfalse\thb@tocrulesfalse\thb@outlineslide{#1}{hideallsubsections}}}
+
+% \thb@outlineslide{<last section of the left column, 0 = one column>}{<\tableofcontents options>}
+\newcommand{\thb@outlineslide}[2]{%
+  \frame{\frametitle{\thbname@outline}
+    \vspace{4\thb@px}
+    \ifnum#1>0\relax
+      \begin{columns}[T,onlytextwidth]
+        \begin{column}{0.46\textwidth}\thb@toc{sections={1-#1},#2}\end{column}\hfill
+        \begin{column}{0.46\textwidth}\thb@toc{sections={\the\numexpr#1+1\relax-},#2}\end{column}
+      \end{columns}
+    \else
+      \thb@toc{#2}
+    \fi}}
+
+% One outline row: number column 70 px, title, gloss 8 px below; rows 26 px apart from a
+% 1 px rule between them (26 px apart without rules in the compact outline)
+\setbeamertemplate{section in toc}{%
+  \ifnum\inserttocsectionnumber>1 \thb@gap{26}\fi
+  \leavevmode
+  \begin{minipage}[t]{70\thb@px}%
+    {\color{thbaccent}\bfseries\thb@fontsize{40}\thb@line{\inserttocsectionnumber}}%
+  \end{minipage}%
+  \begin{minipage}[t]{\dimexpr\linewidth-70\thb@px}%
+    {\color{thbink}\thb@fontsize{42}\thb@line{\inserttocsection}}%
+    \ifthb@tocnotes
+      \ifcsname thb@note@\inserttocsectionnumber\endcsname
+        \thb@gap{8}{\color{thbmuted}\thb@fontsize{28}\thb@line{\thb@note{\inserttocsectionnumber}}}%
+      \fi
+    \fi
+  \end{minipage}\par
+  \ifthb@tocrules
+    \thb@gap{26}{\color{thbline}\rule{\linewidth}{1\thb@px}}\par
+  \fi}
+\setbeamertemplate{subsection in toc}{%
+  \thb@gap{8}\leavevmode\hspace{70\thb@px}%
+  {\color{thbmuted}\thb@fontsize{28}\thb@strut\inserttocsubsection\thb@strut}\par}
+
+% \thb@toc{<\tableofcontents options>}: a table of contents in a box of its own height, so the
+% entries follow each other at exactly the spacing of the templates above. Beamer puts \vfill
+% (nothing in a box), interline glue (switched off) and em-based skips around the entries:
+% .5 em above the first, 1.5 em before each section when subsections are hidden. The tiny
+% font makes those em vanish; every entry template sets its own font.
+\newcommand{\thb@toc}[1]{%
+  \begin{minipage}{\linewidth}\offinterlineskip\fontsize{0.01pt}{0pt}\selectfont
+    \tableofcontents[#1]%
+  \end{minipage}}
+
+% Standalone progress slide, usable anywhere mid-talk
+\newcommand{\thbagenda}[1][\thbname@where]{%
+  \frame{\frametitle{#1}
+    \vspace{4\thb@px}
+    \thb@toc{currentsection,hideallsubsections,sectionstyle=show/shaded}}}
+
+% --------------------------------------------------------- closing slides ---
+\newcommand{\thbclosingframe}[1][\thbname@questions]{%
+  \thb@darkslide{%
+    \thb@vfill
+    \thb@darktitle{#1}%
+    \thb@gap{34}\thb@signature
+    \thb@vfill}}
+
+% Closing slide that keeps the recap on screen during Q&A:
+%   \begin{closing}[Questions?] \item ... \end{closing}
+% The +b argument collects the items, so the whole slide is built in one piece.
+\NewDocumentEnvironment{closing}{O{\thbname@questions} +b}{%
+  \setbeamercolor{itemize item}{fg=thbaccent}%
+  \setbeamercolor{normal text}{fg=white}\usebeamercolor[fg]{normal text}%
+  \thb@darkslide{%
+    \thb@vfill
+    \begin{columns}[c,onlytextwidth]
+      \begin{column}{837\thb@px}
+        \thb@darktitle{#1}%
+        \thb@gap{34}\thb@signature
+      \end{column}\hfill
+      \begin{column}{761\thb@px}
+        {\color{thbaccent}\bfseries\thb@fontsize{24}\thb@line{\MakeUppercase{\thbname@recap}}}%
+        \thb@gap{22}\color{white}\thb@fontsize{32}[1.35]%
+        \begin{itemize}\setlength{\topsep}{\z@}\setlength{\itemsep}{22\thb@px}#2\end{itemize}
+      \end{column}
+    \end{columns}
+    \thb@vfill}}{}
+
+% ------------------------------------------------------ frame title look ---
+% 22 px below the header row: title, subtitle 8 px below it, bar 16 px below that
+\setbeamertemplate{frametitle}{%
+  \nointerlineskip\vspace{22\thb@px}%
+  \begin{beamercolorbox}[wd=\paperwidth,leftskip=\thbmargin,rightskip=\thbmargin]{frametitle}%
+    {\usebeamerfont{frametitle}\thb@line{\insertframetitle}}%
+    \ifx\insertframesubtitle\@empty\else
+      \thb@gap{8}{\usebeamerfont{framesubtitle}\usebeamercolor[fg]{framesubtitle}%
+        \thb@line{\insertframesubtitle}}%
+    \fi
+    \thb@gap{16}\thb@accentbar{56}{6}\par
+  \end{beamercolorbox}%
+  \nointerlineskip\vspace{\thb@contentgap}}
+% Space between the bar and the slide content. The design has 46 px up to the first line box.
+% Beamer adds .2 cm (24 px) above the content of a top-aligned frame, and TeX starts a box at
+% its first glyph, not at a line box; -4 px places a first box, list or table within 3 px of
+% the design and a first paragraph 6 px high.
+\newcommand{\thb@contentgap}{-4\thb@px}
+
+% ------------------------------------------------- content helper macros ---
+% Highlighted takeaway box, at most 1150 px wide, 50 px below what precedes it (as in the
+% design, where it follows the slide's bullet points)
+\newenvironment{takeaway}[1][\thbname@takeaway]
+  {\setlength{\thb@blockmax}{1150\thb@px}\def\thb@blockskip{56\thb@px}\begin{alertblock}{#1}}
+  {\end{alertblock}}
+
+% Theorems: tinted box with a 6 px green rule on the left, upright text, at most 1250 px wide
+\setbeamertemplate{theorem begin}{%
+  \begin{tcolorbox}[thb/box, width=\thb@min{1250\thb@px}{\linewidth},
+      colback=thbtint, thb/left rule={6\thb@px}{thbaccent},
+      left=30\thb@px, right=30\thb@px, top=22\thb@px, bottom=22\thb@px, after upper=\thb@laststrut]
+  \normalfont
+  {\bfseries\thb@fontsize{32}\thb@line{\inserttheoremname\inserttheoremnumber
+   \ifx\inserttheoremaddition\@empty\else\ (\inserttheoremaddition)\fi}}%
+  \thb@gap{10}\thb@firststrut}
+\setbeamertemplate{theorem end}{\end{tcolorbox}}
+
+% Key equation on a tinted band (no header bar)
+\newenvironment{keyeq}{%
+  \begin{tcolorbox}[thb/box, colback=thbtint, left=34\thb@px, right=34\thb@px,
+      top=28\thb@px, bottom=28\thb@px, before skip=40\thb@px,
+      before upper={\abovedisplayskip\z@\abovedisplayshortskip\z@
+        \belowdisplayskip\z@\belowdisplayshortskip\z@}]
+  \thb@fontsize{44}}{\end{tcolorbox}}
+
+% Single headline result:  \thbnumber{42\,\%}{fewer transmissions than fixed rate}
+% It centres itself in the free space of the slide.
+\newcommand{\thbnumber}[2]{%
+  \thb@vfill
+  {\centering
+   {\color{thbprimary}\bfseries\thb@fontsize{200}[0.9]\thb@line{#1}}%
+   \thb@gap{38}\thb@accentbar{62}{6}%
+   \thb@gap{32}\parbox[t]{\thb@min{1100\thb@px}{\linewidth}}{\centering\thb@fontsize{40}\thb@line{#2}}\par}
+  \thb@vfill
+  \vspace*{92\thb@px}}
+
+% Cited statement:  \thbquote{...}{Source, Year}
+\newcommand{\thbquote}[2]{%
+  \begin{tcolorbox}[thb/box, width=\thb@min{1400\thb@px}{\linewidth}, colback=white,
+      thb/left rule={6\thb@px}{thbaccent}, left=34\thb@px, top=6\thb@px, bottom=6\thb@px]
+    {\raggedright\rmfamily\itshape\thb@fontsize{44}[1.35]\thb@line{#1}}%
+    \thb@gap{22}{\thb@fontsize{28}\color{thbmuted}\thb@line{#2}}
+  \end{tcolorbox}}
+
+% Full-bleed figure slide with a dark caption strip along the bottom
+\newcommand{\thbfullfigure}[2]{%
+  {\usebackgroundtemplate{\includegraphics[width=\paperwidth,height=\paperheight]{#1}}%
+   \frame[plain]{\relax
+     \thb@vfill
+     \begin{tcolorbox}[thb/box, grow to left by=\thbmargin, grow to right by=\thbmargin,
+         colback=thbink, coltext=white,
+         left=\thbmargin, right=\thbmargin, top=22\thb@px, bottom=22\thb@px,
+         before skip=0pt, after skip=0pt]
+       \thb@fontsize{28}\thb@line{#2}
+     \end{tcolorbox}}}}
+
+% Two balanced columns:  \begin{twocols}[<width>] ... \colbreak ... \end{twocols}
+% \colbreak exists only inside twocols; elsewhere it explains itself.
+\newcommand{\colbreak}{%
+  \PackageError{thbtalk}{\string\colbreak\space outside twocols}%
+    {\string\colbreak\space separates the columns of \string\begin{twocols}...\string\end{twocols}.}}
+\newenvironment{twocols}[1][0.48]{%
+  \def\colbreak{\end{column}\hfill\begin{column}{#1\textwidth}}%
+  \begin{columns}[T,onlytextwidth]\begin{column}{#1\textwidth}}%
+  {\end{column}\end{columns}}
+
+% Figure with caption, centred. Like the placeholder it adds no space above or below, so it
+% lines up with the top of a column.
+\newcommand{\thbfigure}[3][0.72]{%
+  \par{\centering
+    \includegraphics[width=#1\textwidth]{#2}\\[0.5em]
+    {\small\color{thbmuted}#3}\par}}
+
+% Placeholder box, so a talk compiles before the real figures exist
+\newcommand{\thbplaceholder}[3][0.7]{%
+  \par{\centering
+    \begin{tikzpicture}
+      \fill[thbtint] (0,0) rectangle (#1\textwidth,#2);
+      \draw[thbline, line width=1\thb@px] (0,0) rectangle (#1\textwidth,#2);
+      \node[thbmuted,font=\footnotesize\ttfamily]
+        at (0.5*#1\textwidth,0.5*#2) {#3};
+    \end{tikzpicture}\par}}
+
+% Tables: booktabs rules 3 px and 1.5 px, 28 px cell padding, rows 77 px apart
+\setlength{\heavyrulewidth}{3\thb@px}
+\setlength{\lightrulewidth}{1.5\thb@px}
+\setlength{\aboverulesep}{4\thb@px}
+\setlength{\belowrulesep}{4\thb@px}
+\setlength{\tabcolsep}{28\thb@px}
+\AtBeginEnvironment{tabular}{\renewcommand{\arraystretch}{1.68}}
+\newcommand{\thbhead}[1]{{\color{thbprimary}\bfseries #1}}
+
+% A command name in typewriter type, e.g. \thbcmd{thbbackup}. Unlike \verb it works in
+% every frame, fragile or not. (\char`\\ is the backslash in both OT1 and T1 typewriter fonts.)
+\newcommand{\thbcmd}[1]{\texttt{\char`\\#1}}
+
+% Code listings: 4 px blue rule, line numbers in the box, keywords medium weight
+\lstdefinestyle{thbcode}{
+  basicstyle=\ttfamily\thb@fontsize{30}[1.65]\color{thbink},
+  keywordstyle=\color{thbprimary}\thb@mediumseries,
+  commentstyle=\color{thbmuted}\itshape,
+  stringstyle=\color{thbaccent},
+  numbers=left, numberstyle=\color{thbmuted}, numbersep=26\thb@px,
+  breaklines=true, showstringspaces=false, tabsize=2,
+  aboveskip=0pt, belowskip=0pt}
+\lstset{style=thbcode}
+\newtcblisting{code}[1][]{thb/box, listing only, width=\thb@min{1350\thb@px}{\linewidth},
+  colback=thbcodebg, thb/left rule={4\thb@px}{thbprimary},
+  left=94\thb@px, right=34\thb@px, top=30\thb@px, bottom=30\thb@px,
+  listing options={style=thbcode,#1}}
+
+% Pseudocode: \begin{pseudocode}{Caption} ... \end{pseudocode}; a block at most 1250 px wide,
+% grey line numbers without a colon
+\algrenewcommand\alglinenumber[1]{\thb@strut\color{thbmuted}#1}% the strut: a line box per line
+\newenvironment{pseudocode}[1]{%
+  \setlength{\thb@blockmax}{1250\thb@px}%
+  \begin{block}{#1}\thb@fontsize{32}[1.7]\begin{algorithmic}[1]}%
+  {\end{algorithmic}\end{block}}
+
+% pgfplots house style
+\pgfplotsset{thbplot/.style={
+  width=0.9\textwidth, height=0.55\textheight,
+  axis line style={thbline}, tick style={thbline},
+  every axis label/.append style={thbmuted,font=\small},
+  tick label style={thbmuted,font=\footnotesize},
+  legend style={draw=thbline,font=\footnotesize,fill=white},
+  grid=major, grid style={thbline,dashed},
+  cycle list={{thbprimary,thick},{thbaccent,thick},{thbmuted,thick,dashed}}}}
+
+% References frame (works with plain \bibitem or biblatex \printbibliography)
+\setbeamertemplate{bibliography item}{\color{thbaccent}\rule[0.25ex]{0.8ex}{0.8ex}}
+
+% Backup slides: a divider slide, then everything after it is backup material.
+% \appendix starts a new beamer part; the backup slides are compiled and keep counting.
+\newcommand{\thbbackup}{%
+  \appendix
+  \thb@darkslide{\thb@vfill\thb@darktitle{\thbname@backup}\thb@vfill}}
+
+\endinput

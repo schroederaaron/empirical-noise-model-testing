@@ -1,0 +1,30 @@
+% F3: residuals against gene mean, with the neighbourhood of one target gene (schematic).
+% Pseudo-random but fixed points (seeded), spread growing with the mean. Not data.
+\begin{tikzpicture}[x=0.36cm, y=1.1cm]
+  \pgfmathsetseed{185}
+  % neighbourhood window around the target gene (gene 14)
+  \fill[thbtint] (11.5,-1.75) rectangle (16.5,1.75);
+  \draw[thbprimary, dashed] (11.5,-1.75) -- (11.5,1.75) (16.5,-1.75) -- (16.5,1.75);
+  \draw[thbmuted] (0,0) -- (28.5,0);
+  \draw[-{Stealth}, thbmuted] (0,-1.8) -- (0,1.95);
+  \draw[-{Stealth}, thbmuted] (0,-1.8) -- (28.8,-1.8);
+  \node[anchor=north, font=\scriptsize, text=thbmuted] at (14.4,-1.85) {gene mean (genes sorted by mean)};
+  \node[anchor=south, rotate=90, font=\scriptsize, text=thbmuted] at (-0.2,0) {residual};
+  \foreach \g in {1,...,27} {
+    \pgfmathsetmacro{\s}{0.25+0.045*\g}
+    \foreach \r in {1,2,3} {
+      \pgfmathsetmacro{\e}{\s*rand}
+      \ifnum\g>11 \ifnum\g<17
+        \fill[casecol] (\g,\e) circle (2.6pt);
+      \else
+        \fill[casecol!35] (\g,\e) circle (2pt);
+      \fi\else
+        \fill[casecol!35] (\g,\e) circle (2pt);
+      \fi
+    }
+  }
+  \draw[thbprimary, thick] (14,-1.6) -- (14,1.6);
+  \node[anchor=south, font=\scriptsize, text=thbprimary] at (14,1.75) {target gene};
+  \node[anchor=north west, font=\scriptsize, text=thbprimary, align=left] at (16.7,1.7)
+       {neighbours: genes with\\similar mean (k genes)};
+\end{tikzpicture}

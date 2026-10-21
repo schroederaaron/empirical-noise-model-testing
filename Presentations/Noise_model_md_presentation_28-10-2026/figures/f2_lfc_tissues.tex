@@ -1,0 +1,11 @@
+% F2: one gene's log2FC across three tissues (illustrative values, not data)
+\begin{tikzpicture}
+  \begin{axis}[thbplot, width=0.95\linewidth, height=0.5\textheight,
+      ybar, bar width=0.9cm, grid=none, ymin=-1, ymax=2.6,
+      symbolic x coords={leaf,stem,root}, xtick=data,
+      ylabel={log2 fold change (case / control)},
+      extra y ticks={0}, extra y tick style={grid=major, grid style={thbmuted}},
+      title={\footnotesize\color{thbmuted}one gene, three tissues (illustrative)}]
+    \addplot[fill=casecol, draw=none] coordinates {(leaf,2.1) (stem,0.15) (root,-0.2)};
+  \end{axis}
+\end{tikzpicture}

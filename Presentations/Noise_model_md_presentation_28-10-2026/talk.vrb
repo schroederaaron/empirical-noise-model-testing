@@ -1,0 +1,31 @@
+\frametitle{Repository tour}
+\begin{columns}[T,onlytextwidth]\begin{column}{0.47\textwidth}
+    {\footnotesize
+    \begin{tabular}{@{}l@{\hspace{0.8em}}l@{}}
+      overview      & \texttt{README.md}, \texttt{concise\_project\_info.md} \\
+      manuscript    & \texttt{misc/Tensor\_Omics\_Methods.pdf} \\
+      R interface   & \texttt{rcpp/tensoromics\_functions.R} \\
+      tests         & \texttt{test/mod\_test\_noise\_model*.f90} \\
+      docs          & \texttt{experiments/Noise\_Model\_Test/docs/} \\
+      test scripts  & \texttt{experiments/Noise\_Model\_Test/} \\
+    \end{tabular}}
+  \end{column}\hfill\begin{column}{0.5\textwidth}
+\begin{code}[language=R, basicstyle=\ttfamily\scriptsize, numbers=none]
+res <- tox_compute_noise_pvalues_pipeline_md(
+  case_replicates    = list(leaf = case_leaf,
+                            root = case_root),
+  control_replicates = list(leaf = ctrl_leaf,
+                            root = ctrl_root),
+  max_pool_size      = 50000L)
+\end{code}
+  \end{column}\end{columns}
+  \note{Repository: github.com/asishallab-group/Tensor-Omics, branch 145-empirical-noise-model (not merged
+    into main). Test scripts: the submodule experiments/Noise\_Model\_Test (repository
+    empirical-noise-model-testing): TCGA\_test/scripts/null\_calibration.R, power\_test.R,
+    power\_report.R; Simulated\_data/scripts/calibration\_test.R and calibration\_test\_md.R (the
+    multi-dimensional simulation; so far only a smoke run, no results).
+    Docs: noise\_model\_current\_state.md describes the current model. Web documentation in doc/.
+    Build: ./build.sh, then source("rcpp/tensoromics\_functions.R"). Unit tests: ./test\_runner.sh.
+    The call: one matrix per axis, samples x genes, row names = sample IDs, identical gene columns.
+    max\_pool\_size has no default in the R function; 50000 is never reached.
+    Show where to start reading and where to run something; no live coding.}

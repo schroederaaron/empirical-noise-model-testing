@@ -1,0 +1,29 @@
+% F1: RNA-seq pipeline, tissue sample -> sequencing -> count matrix (schematic)
+\begin{tikzpicture}[
+    stage/.style={draw=thbline, fill=thbtint, rounded corners=2pt, align=center,
+                  minimum height=1.25cm, text width=2.15cm, font=\footnotesize},
+    arr/.style={-{Stealth[length=2.2mm]}, thick, thbmuted}]
+  \node[stage] (s) {tissue sample\\[1pt]{\scriptsize case or control}};
+  \node[stage, right=0.55cm of s] (r) {extract RNA};
+  \node[stage, right=0.55cm of r] (q) {sequence\\[1pt]{\scriptsize millions of reads}};
+  \node[stage, right=0.55cm of q] (m) {map \& count\\[1pt]{\scriptsize reads per gene}};
+  \draw[arr] (s) -- (r);
+  \draw[arr] (r) -- (q);
+  \draw[arr] (q) -- (m);
+  % count matrix: genes x samples
+  \begin{scope}[shift={($(m.east)+(0.75cm,-0.95cm)$)}, font=\scriptsize]
+    \foreach \j/\c in {1/casecol,2/casecol,3/casecol,4/ctrlcol,5/ctrlcol,6/ctrlcol} {
+      \fill[\c!35] (0.42*\j-0.42,1.9) rectangle ++(0.42,0.22);
+    }
+    \foreach \i/\row in {0/{812,640,955,121,97,140},1/{3,0,5,2,1,4},2/{57,61,49,58,66,52},3/{0,1,0,410,388,452}} {
+      \foreach \v [count=\j] in \row {
+        \node[anchor=center, text=thbink] at (0.42*\j-0.21,1.62-0.42*\i) {\v};
+      }
+    }
+    \draw[thbline] (0,0) rectangle (2.52,1.9);
+    \node[anchor=south, text=thbmuted] at (1.26,2.12) {samples};
+    \node[anchor=south, rotate=90, text=thbmuted] at (-0.05,0.95) {genes};
+    \node[anchor=north, text=thbmuted, align=center] at (1.26,-0.05) {count matrix\\(illustrative numbers)};
+  \end{scope}
+  \draw[arr] (m.east) -- ++(0.3cm,0);
+\end{tikzpicture}

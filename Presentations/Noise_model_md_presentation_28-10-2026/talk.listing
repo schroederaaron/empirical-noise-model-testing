@@ -1,0 +1,6 @@
+res <- tox_compute_noise_pvalues_pipeline_md(
+  case_replicates    = list(leaf = case_leaf,
+                            root = case_root),
+  control_replicates = list(leaf = ctrl_leaf,
+                            root = ctrl_root),
+  max_pool_size      = 50000L)

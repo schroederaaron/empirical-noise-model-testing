@@ -1,0 +1,22 @@
+% F5: random-split design. (a) no effect -> calibration; (b) known effect -> power.
+\begin{tikzpicture}[font=\scriptsize,
+    smp/.style={minimum size=0.36cm, inner sep=0pt, draw=white, fill=#1},
+    arr/.style={-{Stealth[length=2mm]}, thick, thbmuted},
+    lab/.style={align=center, text=thbink}]
+  % one homogeneous cohort
+  \foreach \j in {0,...,11} \node[smp=nullcol!60] at (0.38*\j,0) {};
+  \node[lab, anchor=south] at (2.09,0.3) {one homogeneous group (e.g.\ healthy samples of one cohort)};
+  \draw[arr] (2.09,-0.3) -- (2.09,-0.85) node[midway, right, text=thbmuted] {random split};
+  % halves
+  \foreach \j in {0,...,5} \node[smp=casecol!70] at (0.38*\j-0.6,-1.25) {};
+  \foreach \j in {0,...,5} \node[smp=ctrlcol!70] at (0.38*\j+2.9,-1.25) {};
+  \node[lab, anchor=north] at (0.35,-1.5) {half A (fake ``case'')};
+  \node[lab, anchor=north] at (3.85,-1.5) {half B (fake ``control'')};
+  % outcomes
+  \node[draw=thbline, fill=thbtint, rounded corners=2pt, align=left, anchor=north west, text width=4.6cm]
+       (a) at (6.2,0.45) {\textbf{(a) compare as is}\\ every gene is null by construction\\ $\Rightarrow$ \textbf{calibration}};
+  \node[draw=thbline, fill=thbtint, rounded corners=2pt, align=left, anchor=north west, text width=4.6cm]
+       (b) at (6.2,-0.95) {\textbf{(b) inject a known log2FC}\\ into chosen genes (thin the counts)\\ $\Rightarrow$ truth known $\Rightarrow$ \textbf{power}};
+  \draw[arr] (5.1,-1.05) -- (a.west);
+  \draw[arr] (5.1,-1.25) -- (b.west);
+\end{tikzpicture}
