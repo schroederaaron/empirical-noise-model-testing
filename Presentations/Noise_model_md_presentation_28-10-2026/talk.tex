@@ -26,7 +26,7 @@
 
 \title{Evaluating a multi-dimensional noise model for differential expression in multi-tissue RNA-seq data}
 \subtitle{Student project kick-off}
-\author[Project Lead: Aaron Schröder]{Aaron Schröder}
+\author[Aaron Schröder]{Project Lead: Aaron Schröder}
 \institute{TH Bingen -- aaron.schroeder@th-bingen.de}
 \date{28 October 2026}
 
@@ -319,8 +319,11 @@
     Read it honestly: in these runs TOX-log keeps observed FDR closer to nominal than edgeR and DESeq2,
     but its power at matched FDR is below the reference tools in every cohort shown. TOX-raw is
     weaker still.
-    Cohorts: TCGA-COAD, -KIRC, -LUAD, healthy and Stage IV.
-    Source: experiments/Noise\_Model\_Test/TCGA\_test/results/power\_out/.
+    Cohorts: TCGA-COAD, -KIRC, -LUAD, healthy and Stage IV. These are whole-cohort halves, 13 to 41
+    samples per group. Real data at n = 3 and 5, the common case, has not been measured yet (planned
+    as Part RS of the power test).
+    Source: experiments/Noise\_Model\_Test/TCGA\_test/results/power\_out/ (run of 19 Oct 2026; plots
+    re-rendered 21 Oct, same numbers). Full ranking view: backup B9.
     No multi-dimensional results exist yet; producing them is the project.}
 \end{frame}
 
@@ -574,6 +577,16 @@ res <- tox_compute_noise_pvalues_pipeline_md(
     n = 3, 5, 10 replicates; points = BH calls at nominal alpha.
     Source: TCGA\_test/results/power\_out/fdr\_tpr\_curves.png (run of 19 Oct 2026).
     TODO presenter: confirm before showing.}
+\end{frame}
+
+% ---------------------------------------------------------------- B9 (existing results)
+\begin{frame}{B9: Scalar model, Part R precision--recall}
+  \relax  {\centering\includegraphics[height=0.78\textheight]{figures/pr_curves_R.png}\par}
+  \note{Same Part R run as slide 14b, but over the whole ranking instead of one operating point:
+    precision against recall, averaged over 20 rounds; dashed line = prevalence (random ranking).
+    TOX-log stays below limma, edgeR and DESeq2 over most of the recall range; the raw arms are lower
+    still, most clearly in the Stage IV cohorts.
+    Source: TCGA\_test/results/power\_out/pr\_curves\_R.png. TODO presenter: confirm before showing.}
 \end{frame}
 
 \end{document}
