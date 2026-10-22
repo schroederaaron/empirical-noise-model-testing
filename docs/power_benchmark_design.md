@@ -634,7 +634,10 @@ build (`./build.sh` first — the stale-build trap).
    writes the six base cohorts (COAD / LUAD / KIRC × healthy / Stage IV) from the NAS.
 2. **Dispersion parameters (Part P+):** `Rscript TCGA_test/scripts/estimate_dispersion_trend.R
    disp_params.rds <dir>/coad_healthy.rds <dir>/luad_healthy.rds <dir>/kirc_healthy.rds`
-   (without it P+ runs on placeholders, flagged `disp_source = placeholder`).
+   (without it P+ runs on placeholders, flagged `disp_source = placeholder`). The file stores
+   `mu_depth` (the depth `mu` is defined at, `POWER_LIB_SIZE` in `common/power_constants.R`);
+   `power_test.R` refuses a file whose `mu_depth` differs from its `lib_size` or is missing
+   (files written before 21/10/2026 count as stale: re-run the estimator once).
 3. **Smoke test:** `POWER_GENES=1000 POWER_ROUNDS=2 POWER_CORES=4 Rscript TCGA_test/scripts/power_test.R`.
 4. **Full analysis:** `POWER_REAL_RDS=<six comma-separated RDS> POWER_DISP_PARAMS=disp_params.rds
    POWER_CORES=32 Rscript TCGA_test/scripts/power_test.R` (20 rounds, all parts;
@@ -642,12 +645,92 @@ build (`./build.sh` first — the stale-build trap).
    seeds depend only on (part, job index), so a subset run reproduces the full run's
    datasets). The server copy has no `.git`: set `POWER_GIT_COMMIT` for the manifest.
 5. **Report:** `Rscript TCGA_test/scripts/power_report.R` →
-   `power_out/power_{per_round,summary,paired_vs_ref,fdr_tpr_curve,pr_curve,stratified,oracle_gap,pool_diag,breakdown,real_checks}.csv`
-   + plots. `POWER_RAW_DIR` / `POWER_OUT_DIR` override the locations.
+   `power_out/power_{per_round,summary,paired_vs_ref,paired_vs_tox,paired_B_vs_A,fdr_tpr_curve,pr_curve,stratified,scan_radius,oracle_gap,pool_diag,breakdown,real_checks,rs_checks,rs_gates}.csv`
+   + plots. `POWER_RAW_DIR` / `POWER_OUT_DIR` override the locations. The console log is a
+   summary (implementation note C): per-part pivot tables (methods side by side, one metric
+   per table), every table titled, keys repeated in every column chunk, rows capped with a
+   pointer to the CSV that holds the full table.
 6. **Tests:** `Rscript -e 'testthat::test_dir("TCGA_test/tests")'` from the testing-repo root.
+7. **Slurm:** `TCGA_test/slurm/power_{smoke,full,rs}.sbatch`. They run in **Apptainer**
+   (`/media/BioNAS2/apptainer/images/arch-gfortran.sif`, `--cleanenv`, a clean `--home` in
+   `$WORK/.container-home`, `-B /media/BioNAS2`); every setting reaches R through `--env`. The
+   job `cd`s into the Tensor-Omics root, so the relative paths are unchanged; `logs/` is relative
+   to where you submit. Pinned to `--partition=main` because the library is built with
+   `-march=native` (Illegal instruction on the non-AVX node). Two logs per job: `logs/<job>_<id>.out` holds every titled table
+(stdout), `.err` the progress and warning messages (stderr). Part RS smoke test:
+   `sbatch --export=ALL,POWER_ROUNDS_RS=2,RS_COHORTS="kirc_healthy kirc_stageiv",RS_TAG=_rs_smoke power_rs.sbatch`;
+   it prints seconds per job and per method, and the runtime and raw size extrapolated to the
+   full 2400 datasets on 32 cores (`POWER_EXTRAP_JOBS`, `POWER_EXTRAP_CORES`).
 
 The real-truth datasets of §6 (Everaert qPCR, SEQC ERCC, Quartet, yeast subsampling) are
 still not scripted.
+
+---
+
+## 10. Part RS — real data at small n (implementation note D)
+
+**Why.** Part R uses whole-cohort halves (n = 13–41 per group). The most common use case,
+n = 3 or 5 per group, was never measured on real noise; there the variance-matched arms were
+worse calibrated than TOX-log in simulation (P+). Part RS measures calibration **and** power on
+the same six TCGA base cohorts at n = 3 and 5.
+
+**Design.** Per round: 2n distinct samples drawn at random from the base cohort (first n to
+group A, next n to B; a cell with 2n > S is skipped and recorded, `skip = TRUE`), a fresh DE
+set and effects injected by binomial thinning exactly as in Part R (pi1 = 0.1, balanced, Δ = 0),
+or no injection at all (pi1 = 0, the null arm). 100 rounds per (cohort, n, pi1) cell
+(`POWER_ROUNDS_RS`) = 2400 datasets. Null and power rounds are different datasets with different
+seeds (one running job counter across cohort, n, pi1 and round). The composition used for
+balancing is now estimated from 2n samples; `power_rs_checks.csv` reports the realised shift.
+Methods: limma, edgeR, DESeq2, `TOX-log|TPM-centred` (the Part R comparator), and the variance
+arms A c ∈ {1.5, 2, 3, 4} and B c ∈ {1, 2, 3, 4} on the same centred input. No input grid.
+
+**Caveats for every RS statement.** The base cohort is fixed, so SEs reflect subsampling
+variability only. Results are reported **per base cohort** (6), SEs are never pooled across
+cohorts as if independent, and the number of cohorts is stated next to any cross-cohort
+statement. With n = 5 the smallest cohort (LUAD Stage IV, S = 26) uses 10 of 26 samples per
+round, so rounds overlap and the SE is conditional on that cohort.
+
+**Metrics added (all parts).** `any_call_05` (= 1 − `zero_disc_05`; under pi1 = 0 the
+probability of at least one false BH call, i.e. the FDR under the complete null);
+`p_le01_null`, `p_le05_null`, `p_le10_null`, `ks_null` (KS distance of the null p-values to
+U(0, 1)), `n_p_na_null`; for the variance arms the case-side **scan radius**
+`|log2(m_j + 1) − log2(m_0 + 1)|` of the `n_scanned`-th gene nearest in linear mean (the
+Fortran visits candidates in exactly that order), its median and the share above 2 log2 units,
+by expression decile in `power_scan_radius.csv`. In rounds without DE genes every
+DE-dependent metric (TPR, AUC, AUPRC, precision at k, LFC metrics) is NA instead of 0.
+
+### 10.1 Decision protocol (pre-specified; confirmed by the project owner 21/10/2026)
+
+Fixed before any RS run; `power_report.R` evaluates it (`power_rs_gates.csv`, console
+"PART RS DECISION PROTOCOL"). "At least 5 of 6 cohorts" is applied as n_cohorts − 1. The
+comparator is `TOX-log|TPM-centred`.
+
+1. **Calibration first** (pi1 = 0, per cohort, n = 3 and 5). An arm passes in a cohort if its
+   `p_le05_null` ≤ comparator + 0.01; it passes at n if it passes in ≥ 5 of 6 cohorts.
+   `any_call_05`, `ks_null`, `p_le01_null`, `p_le10_null` are reported as supporting evidence,
+   not gated (`any_call_05` is harsh under the complete null).
+2. **Choose c on calibration only:** for each of A and B and each n, the smallest c in the
+   grid that passes step 1. None passes → "fails calibration at n", and that arm stops there.
+3. **Power at the chosen c** (pi1 = 0.1). Improvement over the comparator if AUPRC excess rises
+   by ≥ 0.02 in ≥ 5 of 6 cohorts, no cohort loses more than 0.01, and observed FDR at nominal
+   0.05 is ≤ comparator + 0.02 **in every cohort** (the note does not say how many cohorts this
+   condition needs; every cohort is the reading used). Reported alongside: TPR at nominal and at
+   achieved FDR, FDR, |LFC|80, and the AUPRC-excess gap to limma, edgeR and DESeq2.
+4. **Does shrinkage help?** B (its chosen c) beats A (its chosen c) if AUPRC excess is higher
+   by ≥ 0.02 in ≥ 5 of 6 cohorts and B's `p_le05_null` is not higher than A's by more than
+   0.01 (in every cohort, same reading as in step 3).
+5. **All arms that ran are reported**, failures included. Wording about shrinkage in the
+   documentation is decided only after step 4.
+
+**Results.** — (not run yet)
+
+### 10.2 Optional experiments (switches only; run on request)
+
+- **E1 zero-free universe:** `POWER_R_ZERO_FREE=1` keeps only genes with no zero count in any
+  sample of the base cohort, for every method of Parts R and RS (manifest: `zero_free`,
+  `n_zero_dropped`). Hypothesis: exact zeros at high expression contaminate the pools.
+- **E2 cross-fitted selection:** not implemented (owner decision pending; only if RS fails the
+  calibration gate).
 
 ---
 
