@@ -78,9 +78,28 @@ score_pe <- function(p, tie) {
 
 # ------------------------------------------------------------------ per dataset
 
+#' Kolmogorov-Smirnov distance of p-values to U(0, 1): sup |F_n(x) - x| (exact on
+#' the empirical CDF; ties need no correction because the sup is taken at the jumps).
+ks_unif <- function(p) {
+  p <- sort(p[is.finite(p)]); n <- length(p)
+  if (!n) return(NA_real_)
+  max(seq_len(n) / n - p, p - (seq_len(n) - 1) / n)
+}
+
+#' Null-calibration set (note D WP4) over the true nulls (all genes when pi1 = 0).
+#' Untested nulls (NA p) are excluded and counted.
+null_calibration <- function(p, is_null) {
+  pn <- p[is_null]; ok <- !is.na(pn); x <- pn[ok]
+  f <- function(a) if (length(x)) mean(x <= a) else NA_real_
+  list(p_le01_null = f(0.01), p_le05_null = f(0.05), p_le10_null = f(0.10),
+       ks_null = ks_unif(x), n_p_na_null = sum(!ok))
+}
+
 #' All scalar metrics for one method on one dataset.
 #'   res: data.frame(p, padj, lfc, tie, floor_th[, nbhd_own_case, nbhd_own_control])
 #'   lfc_log2: is res$lfc on a log2 scale (FALSE for TOX-raw)
+#' Without DE genes (pi1 = 0 null arms) every metric that needs them (TPR, AUC,
+#' AUPRC, precision at k, LFC metrics) is NA; the calibration metrics are computed.
 metrics_one <- function(res, is_de, true_lfc, n_de_total, is_hv = NULL, lfc_log2 = TRUE,
                         alphas = PM$alphas, topk = PM$topk) {
   p <- res$p; padj <- res$padj
@@ -103,11 +122,14 @@ metrics_one <- function(res, is_de, true_lfc, n_de_total, is_hv = NULL, lfc_log2
     row[[paste0("tpr_nom_", s)]]  <- tp / max(1, P)
     row[[paste0("tpr_all_nom_", s)]] <- tp / max(1, n_de_total)
     row[[paste0("zero_disc_", s)]] <- as.integer(tp + fp == 0)
+    if (P == 0) row[[paste0("tpr_nom_", s)]] <- row[[paste0("tpr_all_nom_", s)]] <- NA_real_
   }
+  # P(at least one BH call); under pi1 = 0 this is P(any false call) = the FDR.
+  row$any_call_05 <- 1 - row$zero_disc_05
   called05 <- !is.na(padj) & padj < 0.05
   row$fpr_null05 <- sum(called05 & !is_de) / max(1, sum(!is_de))
-  # Unadjusted calibration of the true nulls (the P+ / D null arms): P(p <= 0.05 | null).
-  row$p_le05_null <- if (any(tested & !is_de)) mean(p[tested & !is_de] <= 0.05) else NA_real_
+  # Unadjusted calibration of the true nulls (the P+ / D / RS null arms): P(p <= a | null).
+  row <- c(row, null_calibration(p, !is_de))
   row$fpr_hv05 <- if (any(is_hv)) mean(called05[is_hv]) else NA_real_
   row$fpr_nonhv05 <- if (any(is_hv)) sum(called05 & !is_de & !is_hv) / max(1, sum(!is_de & !is_hv))
                      else NA_real_
@@ -115,6 +137,7 @@ metrics_one <- function(res, is_de, true_lfc, n_de_total, is_hv = NULL, lfc_log2
   k05 <- ach_step(r_p, 0.05)
   row$tpr_ach05     <- if (k05 > 0) r_p$tp[k05] / max(1, P) else 0
   row$tpr_all_ach05 <- if (k05 > 0) r_p$tp[k05] / max(1, n_de_total) else 0
+  if (P == 0) row$tpr_ach05 <- row$tpr_all_ach05 <- NA_real_
 
   for (nm in c("p", "pe")) {
     r <- if (nm == "p") r_p else r_pe
@@ -130,7 +153,7 @@ metrics_one <- function(res, is_de, true_lfc, n_de_total, is_hv = NULL, lfc_log2
   row$auprc_excess_pe <- row$auprc_pe - row$prevalence
   row$auprc_lift_pe   <- row$auprc_pe / row$prevalence
   spe <- score_pe(p, res$tie); o <- order(spe, decreasing = TRUE, na.last = TRUE)
-  for (k in topk) row[[paste0("prec_top", k)]] <- mean(is_de[o[seq_len(min(k, length(o)))]])
+  for (k in topk) row[[paste0("prec_top", k)]] <- if (P > 0) mean(is_de[o[seq_len(min(k, length(o)))]]) else NA_real_
   row$prec_top_nde <- if (P > 0) mean(is_de[o[seq_len(P)]]) else NA_real_   # R-precision
 
   cd <- called05 & is_de
@@ -179,11 +202,29 @@ metrics_one <- function(res, is_de, true_lfc, n_de_total, is_hv = NULL, lfc_log2
   row$d0               <- pos(if (vb) res$vb_d0[1] else NA_real_)  # Inf = no excess scatter; NA in mode A
   row$d0_inf           <- if (vb && !is.na(row$d0)) as.numeric(is.infinite(row$d0)) else NA_real_
   row$w                <- pos(if (vb) res$vb_w[1] else NA_real_)
+  # Scan radius of the case-side pool in log2 units (note D WP4; power_test.R
+  # scan_radius). NA for runs written before the column existed.
+  rad <- if (vb && !is.null(res$vb_scan_radius)) res$vb_scan_radius[tested] else NULL
+  rad <- rad[is.finite(rad)]
+  row$scan_radius_median <- if (length(rad)) median(rad) else NA_real_
+  row$frac_radius_gt2    <- if (length(rad)) mean(rad > 2) else NA_real_
   as.data.frame(row)
+}
+
+#' Scan radius by expression decile (note D WP4), tested genes of a variance arm.
+radius_strata <- function(res, expr) {
+  if (is.null(res$vb_scan_radius) || !any(is.finite(res$vb_scan_radius))) return(NULL)
+  dec <- cut(expr, unique(quantile(expr, seq(0, 1, 0.1))), include.lowest = TRUE, labels = FALSE)
+  ok <- !is.na(res$p) & is.finite(res$vb_scan_radius) & !is.na(dec)
+  if (!any(ok)) return(NULL)
+  a <- lapply(split(res$vb_scan_radius[ok], dec[ok]), function(r)
+    c(n = length(r), scan_radius_median = median(r), frac_radius_gt2 = mean(r > 2)))
+  data.frame(expr_decile = as.integer(names(a)), do.call(rbind, a), row.names = NULL)
 }
 
 #' TPR on the achieved-FDR grid (for averaged FDR-TPR curves).
 curve_one <- function(res, is_de, grid = PM$fdr_grid) {
+  if (!any(is_de)) return(NULL)
   r <- roc_steps(-res$p, is_de)
   data.frame(fdr = grid, tpr = vapply(grid, function(t) {
     k <- ach_step(r, t); if (k > 0) r$tp[k] / r$P else 0 }, numeric(1)))

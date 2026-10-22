@@ -40,6 +40,11 @@ CONFIG <- list(
   b_default = 1000
 )
 
+# Console width for every script that sources this file (note C R1): the benchmark
+# tables need 250 characters, and at R's default 80 a wide table is split into
+# blocks hundreds of lines apart in a Slurm log.
+options(width = 250, max.print = 1e6)
+
 # Export configuration to global environment
 assign("BASE_DATA_DIR", CONFIG$base_data_dir, envir = .GlobalEnv)
 assign("ORTHOLOG_FILE", CONFIG$ortholog_file, envir = .GlobalEnv)
