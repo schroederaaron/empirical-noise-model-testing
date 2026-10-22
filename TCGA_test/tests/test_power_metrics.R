@@ -107,3 +107,37 @@ test_that("breakdown_point finds the first Delta above the limit", {
   d$fdr_nom_05 <- 0.01
   expect_identical(breakdown_point(d, 0.10, B = 50)$breakdown_delta, Inf)
 })
+
+# ---------------------------------------------------------------- note D WP4
+
+test_that("null calibration: uniform ~ 0.05 / small KS; all 1 -> 0; all 0 -> 1; NA excluded and counted", {
+  set.seed(21); p <- runif(2e4)
+  nc <- null_calibration(p, rep(TRUE, length(p)))
+  expect_equal(nc$p_le05_null, 0.05, tolerance = 0.1)
+  expect_equal(nc$p_le01_null, 0.01, tolerance = 0.2); expect_equal(nc$p_le10_null, 0.10, tolerance = 0.1)
+  expect_lt(nc$ks_null, 0.015)
+  expect_identical(null_calibration(rep(1, 50), rep(TRUE, 50))$p_le05_null, 0)
+  expect_identical(null_calibration(rep(0, 50), rep(TRUE, 50))$p_le05_null, 1)
+  expect_equal(null_calibration(rep(1, 50), rep(TRUE, 50))$ks_null, 1)
+  na <- null_calibration(c(NA, NA, 0.01, 0.5), c(TRUE, TRUE, TRUE, FALSE))
+  expect_identical(na$n_p_na_null, 2L); expect_identical(na$p_le05_null, 1)
+  expect_true(is.na(null_calibration(c(NA, NA), c(TRUE, TRUE))$ks_null))
+})
+
+test_that("ks_unif matches stats::ks.test on continuous data", {
+  set.seed(22); p <- rbeta(500, 0.8, 1)
+  expect_equal(ks_unif(p), unname(suppressWarnings(ks.test(p, "punif"))$statistic), tolerance = 1e-12)
+})
+
+test_that("pi1 = 0: DE-dependent metrics NA, calibration finite, any_call_05 = 1 - zero_disc_05", {
+  set.seed(23); p <- c(runif(999), 1e-8)
+  m <- metrics_one(mk_res(p), rep(FALSE, 1000), rep(0, 1000), 0L)
+  for (c in c("tpr_nom_05", "tpr_ach05", "auprc_pe", "auc_p", "prec_top100", "prec_top_nde", "lfc80"))
+    expect_true(is.na(m[[c]]), label = c)
+  for (c in c("p_le05_null", "p_le01_null", "ks_null", "fdr_nom_05", "any_call_05"))
+    expect_true(is.finite(m[[c]]), label = c)
+  expect_identical(m$any_call_05, 1 - m$zero_disc_05)
+  expect_identical(m$any_call_05, 1)                     # the 1e-8 gene is called and false
+  expect_identical(m$fdr_nom_05, 1)                      # complete null: FDP = 1 when anything is called
+  expect_null(curve_one(mk_res(p), rep(FALSE, 1000)))
+})

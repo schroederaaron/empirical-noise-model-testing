@@ -27,6 +27,20 @@ out <- args[1]; files <- args[-1]
 .libPaths(c(normalizePath("external/docker_r_libs", mustWork = FALSE), .libPaths()))
 suppressPackageStartupMessages(library(edgeR))
 
+# POWER_LIB_SIZE (common/power_constants.R) is the depth mu is defined at; it is saved
+# as mu_depth, and power_test.R rejects a file whose mu_depth differs from its lib_size.
+COMMON_DIR <- local({
+  f <- sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE))
+  cand <- c(if (length(f)) file.path(dirname(normalizePath(f[1])), "..", "..", "common"),
+            "analysis/common", "experiments/Noise_Model_Test/common", "common", ".")
+  hit <- cand[file.exists(file.path(cand, "power_constants.R"))]
+  if (!length(hit)) stop("common/power_constants.R not found; looked in: ", paste(cand, collapse = ", "))
+  normalizePath(hit[1])
+})
+source(file.path(COMMON_DIR, "power_constants.R"))
+source(file.path(COMMON_DIR, "print_utils.R"))
+options(width = 250)
+
 MIN_MEAN <- 10          # same expression floor as power_test.R Part R
 
 #' DESeq2's parametricDispersionFit: phi = a0 + a1 / mu, Gamma GLM (identity link),
@@ -52,8 +66,7 @@ one <- lapply(files, function(f) {
   y <- normLibSizes(DGEList(cnt))
   y <- estimateDisp(y, design = matrix(1, ncol(cnt), 1), prior.df = 0, tagwise = TRUE)
   eff <- y$samples$lib.size * y$samples$norm.factors
-  # 4e7 must be equal to PCFG$lib_size from power_test.R
-  mu <- rowMeans(sweep(cnt, 2, eff / 4e7, "/"))   # mean count per gene at the simulator's depth (lib_size = 4e7)  
+  mu <- rowMeans(sweep(cnt, 2, eff / POWER_LIB_SIZE, "/"))   # mean count per gene at the simulator's depth
   phi <- y$tagwise.dispersion
   ok <- is.finite(phi) & phi > 1e-6                              # drop boundary (Poisson) fits
   label <- if (!is.null(d$project_id)) paste0(d$project_id, "/", d$stage) else basename(f)
@@ -72,11 +85,12 @@ summ <- function(d) {
 }
 per <- do.call(rbind, lapply(split(D, D$cohort), function(d) cbind(cohort = d$cohort[1], summ(d))))
 pooled <- summ(D)
-print(per, row.names = FALSE)
-message(sprintf("POOLED: phi_inf = %.4f, c = %.3f, sigma_hat = %.3f (upper bound), sigma_hat_corrected = %.3f",
-                pooled$phi_inf, pooled$c, pooled$sigma_hat, pooled$sigma_hat_corrected))
+print_tab(per, "DISPERSION TREND per cohort", keys = "cohort")
+cat(sprintf("POOLED: phi_inf = %.4f, c = %.3f, sigma_hat = %.3f (upper bound), sigma_hat_corrected = %.3f",
+                pooled$phi_inf, pooled$c, pooled$sigma_hat, pooled$sigma_hat_corrected), "\n")
 
 saveRDS(list(phi_inf = pooled$phi_inf, c = pooled$c, sigma_hat = pooled$sigma_hat,
              sigma_hat_corrected = pooled$sigma_hat_corrected, lib_mean = pooled$lib_mean,
+             mu_depth = POWER_LIB_SIZE,
              per_cohort = per, inputs = normalizePath(files), date = format(Sys.time())), out)
 message("wrote ", out)
