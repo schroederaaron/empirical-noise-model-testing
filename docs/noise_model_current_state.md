@@ -118,7 +118,7 @@ subroutine compute_noise_pvalue_pipeline( &          ! both scalar modules
 - `delta_hat` is the median statistic across genes, the estimated composition shift. It is always reported.
 - `beta_centre = 1` subtracts `delta_hat` before scoring (median centring of log-ratios, see *Normalisation* below). The flag and its semantics are the same as in `noise_model_md` at `d = 1`. It must be 0 whenever the R side has already normalised. Any value other than 0 or 1 gives `ERR_INVALID_INPUT`.
 
-The C entries keep one ABI for both scalar modules, and so does the Rcpp driver. The R wrappers are `tox_compute_noise_pvalues_pipeline[_exact](case_replicates, control_replicates, valid_genes_own = NULL, beta_centre = 0L, norm_method, k_start, k_step, k_max, tau, null_method, max_pool_size)`. `valid_genes_own = NULL` tests every gene. The binding stops if the vector does not have one entry per gene column.
+The C entries keep one ABI for both scalar modules, and so does the Rcpp driver. The R wrappers are `tox_compute_noise_pvalues_pipeline[_exact](case_replicates, control_replicates, valid_genes_own = NULL, beta_centre = 0L, norm_method = 1L, k_start, k_step, k_max, tau, null_method, max_pool_size)`. `norm_method = 1` (log2) is the default in every R wrapper; `0` gives the linear branch. `valid_genes_own = NULL` tests every gene. The binding stops if the vector does not have one entry per gene column.
 
 ## Input dimension check (both scalar modules)
 
@@ -343,7 +343,7 @@ subroutine compute_noise_pvalue_pipeline_variance( &
 C entry: `compute_noise_pvalues_pipeline_variance_c`. Rcpp binding:
 `tox_compute_noise_pvalues_pipeline_variance_rcpp`. R wrapper:
 `tox_compute_noise_pvalues_pipeline_variance(case_replicates, control_replicates,
-variance_mode = c("band", "shrunk"), valid_genes_own = NULL, beta_centre = 0L, norm_method = 0L,
+variance_mode = c("band", "shrunk"), valid_genes_own = NULL, beta_centre = 0L, norm_method = 1L,
 k = 50L, c_tau = NULL, loess_span = 0.3, loess_degree = 1L, loess_robust = TRUE, robust_var = TRUE,
 max_pool_size)`. `c_tau = NULL` gives the notes' primary values: 1.5 for `"band"`, 1.0 for
 `"shrunk"`.
