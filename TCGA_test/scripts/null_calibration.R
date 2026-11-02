@@ -216,25 +216,25 @@ TOX_ARMS <- list(
 # Only build the (costly) shared edgeR/limma gene set per cohort if a *-degfilt arm needs it.
 ANY_SHARED_ARM <- any(vapply(TOX_ARMS, function(a) isTRUE(a$shared), logical(1)))
 
-# Variance-matched neighbourhood (implementation notes A "vband" / B "vshrunk";
-# tox_compute_noise_pvalues_pipeline_variance, eval doc §21). The null halves are
-# where c_tau is CHOSEN (note A section 7, step 1), so every c variant runs here, plus
-# note B's checks: robust vs classical scatter for d0 (§5.3) and the LOESS span
-# sensitivity (§5.4, primary arms only). Fixed k = VMATCH_K genes: these arms do not
-# run the K_GRID sweep; their k_config is tagged "k<VMATCH_K>_fixed".
+# Variance band (implementation note A, raw match; note F section 4, James-Stein
+# match "js" -- replaces note B's shrunk band, removed 28/10/2026;
+# tox_compute_noise_pvalues_pipeline_variance, eval doc §21/§22). The null halves
+# are where the band constant is CHOSEN (note A section 7, step 1), so every c
+# variant runs here, plus the LOESS span sensitivity (primary arms only). Fixed k =
+# VMATCH_K genes: these arms do not run the K_GRID sweep; their k_config is tagged
+# "k<VMATCH_K>_fixed".
 VMATCH_K <- 50L
 VMATCH_ARMS <- list(
   list(norm = "log", match = "A", c_tau = 1.0, label = "TOX-log-vband-c1"),
   list(norm = "log", match = "A", c_tau = 1.5, label = "TOX-log-vband"),
   list(norm = "log", match = "A", c_tau = 2.0, label = "TOX-log-vband-c2"),
-  list(norm = "log", match = "B", c_tau = 0.5, label = "TOX-log-vshrunk-c0.5"),
-  list(norm = "log", match = "B", c_tau = 1.0, label = "TOX-log-vshrunk"),
-  list(norm = "log", match = "B", c_tau = 2.0, label = "TOX-log-vshrunk-c2"),
-  list(norm = "log", match = "B", c_tau = 1.0, robust_var = FALSE, label = "TOX-log-vshrunk-classicalvar"),
+  list(norm = "log", match = "A", c_tau = 3.0, label = "TOX-log-vband-c3"),
+  list(norm = "log", match = "js", c_js = 0.5, label = "TOX-log-vband-js-c0.5"),
+  list(norm = "log", match = "js", c_js = 1.0, label = "TOX-log-vband-js-c1"),
   list(norm = "log", match = "A", c_tau = 1.5, span = 0.15, label = "TOX-log-vband-span0.15"),
   list(norm = "log", match = "A", c_tau = 1.5, span = 0.5,  label = "TOX-log-vband-span0.5"),
-  list(norm = "log", match = "B", c_tau = 1.0, span = 0.15, label = "TOX-log-vshrunk-span0.15"),
-  list(norm = "log", match = "B", c_tau = 1.0, span = 0.5,  label = "TOX-log-vshrunk-span0.5")
+  list(norm = "log", match = "js", c_js = 1.0, span = 0.15, label = "TOX-log-vband-js-span0.15"),
+  list(norm = "log", match = "js", c_js = 1.0, span = 0.5,  label = "TOX-log-vband-js-span0.5")
 )
 
 # ---------------- normalisation comparison: counts vs TPM ----------------
@@ -426,10 +426,11 @@ run_tox_once <- function(raw_mat, norm_method, sp, kcfg = K_GRID[[1]],
     # Variance-band arm: fixed k, exact null; kcfg / null_method do not apply.
     res <- tox_compute_noise_pvalues_pipeline_variance(
       case_replicates = pa$prelog, control_replicates = pb$prelog,
-      variance_mode = if (vmatch$match == "A") "band" else "shrunk",
+      variance_mode = "band", match_variable = if (vmatch$match == "A") "raw" else "js",
       beta_centre = as.integer(beta_centre), norm_method = norm_int,
-      k = VMATCH_K, c_tau = vmatch$c_tau, loess_span = if (is.null(vmatch$span)) 0.3 else vmatch$span,
-      robust_var = if (is.null(vmatch$robust_var)) TRUE else vmatch$robust_var,
+      k = VMATCH_K, c_tau = if (is.null(vmatch$c_tau)) 1.5 else vmatch$c_tau,
+      c_js = if (is.null(vmatch$c_js)) 1.0 else vmatch$c_js,
+      loess_span = if (is.null(vmatch$span)) 0.3 else vmatch$span,
       max_pool_size = MAX_POOL)
     if (!is.null(res$ierr) && res$ierr != 0L) stop(sprintf("TOX ierr = %d", res$ierr))
     p <- res$pvalues_own; p[p < 0 | p > 1] <- NA
@@ -851,10 +852,10 @@ pv_all <- if (length(pval_pool)) as.data.frame(rbindlist(pval_pool)) else NULL
 # full k grid lives in the CSV, the kNN-sweep table above, and the dedicated kNN plot below.
 REF_K   <- if ("k20_50" %in% summ$k_config) "k20_50" else stats::na.omit(unique(summ$k_config))[1]
 # The normalisation-grid arms get their own plot (below); keep them out of the main ones.
-# Variance-band arms: only the two PRIMARY ones (A c = 1.5, B c = 1) enter the main
-# plots, at their fixed k; the c / span / classical-variance variants get their own plot.
+# Variance-band arms: only the two PRIMARY ones (raw c = 1.5, JS c_js = 1) enter the main
+# plots, at their fixed k; the c / span variants get their own plot.
 VMATCH_LABELS  <- vapply(VMATCH_ARMS, `[[`, "", "label")
-VMATCH_PRIMARY <- c("TOX-log-vband", "TOX-log-vshrunk")
+VMATCH_PRIMARY <- c("TOX-log-vband", "TOX-log-vband-js-c1")
 is_vmatch      <- function(m) m %in% VMATCH_LABELS
 ref_rows <- function(d) (is.na(d$k_config) | d$k_config == REF_K | d$method %in% VMATCH_PRIMARY) &
                         !is_norm_arm(d$method) & (!is_vmatch(d$method) | d$method %in% VMATCH_PRIMARY)

@@ -22,7 +22,7 @@ PM <- list(
 # Cell keys: one combination of simulation parameters. Keys unused by a part
 # hold a constant (never cycled), so they group harmlessly.
 CELL <- c("part", "dist", "n_rep", "pi1", "het", "frac_up", "depth", "disp_model",
-          "hv_frac", "sigma_d", "delta_target", "cohort")
+          "hv_frac", "sigma_d", "rho", "delta_target", "cohort")
 
 # ------------------------------------------------------------------ ranking
 
@@ -91,7 +91,7 @@ ks_unif <- function(p) {
 null_calibration <- function(p, is_null) {
   pn <- p[is_null]; ok <- !is.na(pn); x <- pn[ok]
   f <- function(a) if (length(x)) mean(x <= a) else NA_real_
-  list(p_le01_null = f(0.01), p_le05_null = f(0.05), p_le10_null = f(0.10),
+  list(p_le001_null = f(0.001), p_le01_null = f(0.01), p_le05_null = f(0.05), p_le10_null = f(0.10),
        ks_null = ks_unif(x), n_p_na_null = sum(!ok))
 }
 
@@ -185,12 +185,13 @@ metrics_one <- function(res, is_de, true_lfc, n_de_total, is_hv = NULL, lfc_log2
   for (nb in c("nbhd_own_case", "nbhd_own_control"))
     row[[paste0(nb, "_median")]] <- if (!is.null(res[[nb]]) && any(is.finite(res[[nb]])))
                                       median(res[[nb]], na.rm = TRUE) else NA_real_
-  # Variance-band arms (implementation notes A/B; vb_* columns, NA for every other
-  # method). New columns only -- no existing metric changes.
-  #   frac_short_pool   tested genes whose smaller side pool holds < k genes
+  # Variance-aware arms (notes A, F; vb_* columns, NA for every other method).
+  #   frac_short_pool   tested genes whose smaller side pool holds < k genes (band/adaptive)
   #   n_scanned_median  candidate genes examined per (case-side) pool
   #   frac_skipped      kept genes without a p-value (band pool < 10 genes, etc.)
-  #   tau_var, d0, d0_inf, w   the band width and note B's prior df / weight
+  #   tau_var           the band width
+  #   lambda_*, p_hat, participation_ratio   James-Stein shrinkage (note F section 2)
+  #   frac_stop_1..6, radius_median          adaptive growth (note F section 5)
   vb <- !is.null(res$vb_k) && any(is.finite(res$vb_k))
   gmin <- if (vb) pmin(res$vb_genes_case, res$vb_genes_control) else NULL
   row$frac_short_pool  <- if (vb && any(tested)) mean(gmin[tested] < res$vb_k[1], na.rm = TRUE) else NA_real_
@@ -198,10 +199,14 @@ metrics_one <- function(res, is_de, true_lfc, n_de_total, is_hv = NULL, lfc_log2
                           else NA_real_
   row$frac_skipped     <- if (vb) mean(!tested) else NA_real_
   row$tau_var          <- if (vb) res$vb_tau[1] else NA_real_
-  pos <- function(x) if (vb && is.finite(x) && x >= 0 || (vb && is.infinite(x))) x else NA_real_
-  row$d0               <- pos(if (vb) res$vb_d0[1] else NA_real_)  # Inf = no excess scatter; NA in mode A
-  row$d0_inf           <- if (vb && !is.na(row$d0)) as.numeric(is.infinite(row$d0)) else NA_real_
-  row$w                <- pos(if (vb) res$vb_w[1] else NA_real_)
+  first <- function(col) if (vb && !is.null(res[[col]])) res[[col]][1] else NA_real_
+  for (nm in c("lambda_pool", "lambda_case", "lambda_control", "p_hat", "participation_ratio"))
+    row[[nm]] <- first(paste0("vb_", nm))
+  stp <- if (vb && !is.null(res$vb_stop_case)) res$vb_stop_case[tested] else NULL
+  for (r in 1:6) row[[paste0("frac_stop_", r)]] <- if (length(stp) && any(is.finite(stp))) mean(stp == r, na.rm = TRUE)
+                                                   else NA_real_
+  rr <- if (vb && !is.null(res$vb_radius_case)) res$vb_radius_case[tested] else NULL
+  row$radius_median <- if (length(rr) && any(is.finite(rr))) median(rr, na.rm = TRUE) else NA_real_
   # Scan radius of the case-side pool in log2 units (note D WP4; power_test.R
   # scan_radius). NA for runs written before the column existed.
   rad <- if (vb && !is.null(res$vb_scan_radius)) res$vb_scan_radius[tested] else NULL
@@ -209,6 +214,22 @@ metrics_one <- function(res, is_de, true_lfc, n_de_total, is_hv = NULL, lfc_log2
   row$scan_radius_median <- if (length(rad)) median(rad) else NA_real_
   row$frac_radius_gt2    <- if (length(rad)) mean(rad > 2) else NA_real_
   as.data.frame(row)
+}
+
+#' Calibration and power by expression decile (note F section 7: "all by expression
+#' decile"). Null genes: P(p <= a); BH calls at 0.05: their false share and the TPR.
+decile_one <- function(res, is_de, expr) {
+  dec <- cut(expr, unique(quantile(expr, seq(0, 1, 0.1))), include.lowest = TRUE, labels = FALSE)
+  called <- !is.na(res$padj) & res$padj < 0.05
+  do.call(rbind, lapply(sort(unique(dec[!is.na(dec)])), function(d) {
+    i <- which(dec == d); nul <- i[!is_de[i]]; pn <- res$p[nul]; pn <- pn[!is.na(pn)]
+    f <- function(a) if (length(pn)) mean(pn <= a) else NA_real_
+    nc <- sum(called[i])
+    data.frame(expr_decile = d, n = length(i), n_de = sum(is_de[i]),
+               p_le001_null = f(0.001), p_le01_null = f(0.01), p_le05_null = f(0.05),
+               n_called_05 = nc, fdr_nom_05 = if (nc > 0) sum(called[i] & !is_de[i]) / nc else 0,
+               tpr_nom_05 = if (any(is_de[i])) mean(called[i][is_de[i]]) else NA_real_)
+  }))
 }
 
 #' Scan radius by expression decile (note D WP4), tested genes of a variance arm.

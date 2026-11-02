@@ -42,9 +42,13 @@
 #                             tau_var, d0 (finite only), d0_inf, w
 #   power_paired_vs_tox.csv   variance-band arms minus their plain TOX comparator, paired
 #                             per round (P+, V: TOX-log; R, RS: TOX-log|TPM-centred)
-#   power_paired_B_vs_A.csv   model B minus model A at equal c (B c1 vs A c1.5, c2, c3, c4),
+#   power_paired_arms.csv     variance arm pairs (RCFG$pairs, e.g. xfit-js minus xfit-raw),
 #                             paired per round, with SE and t
-#   power_rs_gates.csv        Part RS decision protocol (note D section 6), steps 1-4
+#   power_rs_gates.csv        Part RS decision protocol (note E v2 section 6): gates, parameter
+#                             choice, shrinkage helps / not needed from n
+#   power_by_decile.csv       calibration and power by expression decile (note F section 7)
+#   variance_diagnostic_{corr,bins,enrichment}.csv, variance_flag_{utility,decision}.csv
+#                             note G A1-A3 and the flag decision
 #   power_rs_checks.csv       Part RS per (cohort, n) checks: composition shift, overlap
 #   power_scan_radius.csv     variance arms: scan radius by expression decile
 #   power_paired_vs_ref.csv   paired per-round difference vs limma
@@ -74,6 +78,7 @@ if (!exists("COMMON_DIR")) COMMON_DIR <- local({
 source(file.path(COMMON_DIR, "config.R"))
 source(file.path(COMMON_DIR, "power_metrics.R"))
 source(file.path(COMMON_DIR, "print_utils.R"))
+source(file.path(COMMON_DIR, "variance_diagnostics.R"))
 options(width = 250, max.print = 1e6)          # note C R1 (also set in config.R)
 suppressPackageStartupMessages({ library(ggplot2); library(parallel) })
 rd <- function(f) read.csv(f, stringsAsFactors = FALSE)      # .csv.gz decompressed by base R
@@ -91,29 +96,36 @@ RCFG <- list(
                      "TOX-log-TPM-centred", "TOX-log-TMM"),
   grid_inputs = c("TPM", "TPM-centred", "counts", "counts-centred", "TMM", "MoR"),
   grid_arms   = c("TOX-log", "TOX-log-blocked", "TOX-raw", "TOX-raw-blocked"),
-  # Variance-matched arms (implementation notes A/B) and, per part, the plain TOX arm
-  # each is paired against (same input; Part R runs them on TPM-centred).
-  # vmatch_c: the band constant of each arm (power_test.R PCFG$vmatch_arms).
-  vmatch_c = c(`TOX-log-vband-c1` = 1, `TOX-log-vband` = 1.5, `TOX-log-vband-c2` = 2,
-               `TOX-log-vband-c3` = 3, `TOX-log-vband-c4` = 4,
-               `TOX-log-vshrunk-c0.5` = 0.5, `TOX-log-vshrunk` = 1, `TOX-log-vshrunk-c2` = 2,
-               `TOX-log-vshrunk-c3` = 3, `TOX-log-vshrunk-c4` = 4),
-  vmatch_methods = c("TOX-log-vband-c1", "TOX-log-vband", "TOX-log-vband-c2", "TOX-log-vband-c3",
-                     "TOX-log-vband-c4", "TOX-log-vshrunk-c0.5", "TOX-log-vshrunk", "TOX-log-vshrunk-c2",
-                     "TOX-log-vshrunk-c3", "TOX-log-vshrunk-c4", "TOX-log-vshrunk-classicalvar"),
-  vmatch_comparator = c(`P+` = "TOX-log", V = "TOX-log", R = "TOX-log|TPM-centred", RS = "TOX-log|TPM-centred"),
-  # Note D WP4: B minus A at equal c (B c1 is paired with A c1.5, the A default).
-  b_vs_a = list(c(B = "TOX-log-vshrunk",    A = "TOX-log-vband"),
-                c(B = "TOX-log-vshrunk-c2", A = "TOX-log-vband-c2"),
-                c(B = "TOX-log-vshrunk-c3", A = "TOX-log-vband-c3"),
-                c(B = "TOX-log-vshrunk-c4", A = "TOX-log-vband-c4")),
-  # Note D section 6 (confirmed by the project owner 21/10/2026). A cohort-count
-  # condition "in at least 5 of 6 cohorts" is applied as n_cohorts - 1.
-  gate = list(cal_margin = 0.01,      # step 1: p_le05_null <= comparator + this
-              auprc_gain = 0.02,      # steps 3, 4: AUPRC excess gain needed
-              auprc_loss = 0.01,      # step 3: no cohort loses more than this
-              fdr_margin = 0.02,      # step 3: fdr_nom_05 <= comparator + this, every cohort
-              b_cal_margin = 0.01)    # step 4: B's p_le05_null <= A's + this, every cohort
+  # Variance-aware arms (implementation notes A, F; power_test.R PCFG$vmatch_arms) and,
+  # per part, the plain TOX arm they are compared with (same input; Parts R and RS
+  # run them on TPM-centred).
+  vmatch_methods = c("TOX-log-vband-c3", "TOX-log-vband-js-c0.5", "TOX-log-vband-js-c1",
+                     "TOX-log-xfit-raw", "TOX-log-xfit-js", "TOX-log-xfit-js-loess", "TOX-log-xfit-js-nocf",
+                     "TOX-log-adapt-r0.25", "TOX-log-adapt-r0.5", "TOX-log-adapt-r1", "TOX-log-adapt-xfit-js"),
+  vmatch_comparator = c(`P+` = "TOX-log", V = "TOX-log", U = "TOX-log",
+                        R = "TOX-log|TPM-centred", RS = "TOX-log|TPM-centred"),
+  # Paired per-round comparisons between variance arms (arm minus ref).
+  pairs = list(c(arm = "TOX-log-xfit-js",       ref = "TOX-log-xfit-raw", label = "shrinkage: xfit-js - xfit-raw"),
+               c(arm = "TOX-log-xfit-js-loess", ref = "TOX-log-xfit-js",  label = "target: loess - median"),
+               c(arm = "TOX-log-xfit-js-nocf",  ref = "TOX-log-xfit-js",  label = "same-group - cross-fit"),
+               c(arm = "TOX-log-vband-js-c1",   ref = "TOX-log-vband-c3", label = "band: js c1 - raw c3"),
+               c(arm = "TOX-log-adapt-xfit-js", ref = "TOX-log-xfit-js",  label = "adaptive + xfit - xfit")),
+  # Free parameters, chosen on the pi1 = 0 rounds only: the smallest value whose arm
+  # passes the calibration and tail gates (note F section 7).
+  param_grid = list(`vband-js` = c(`TOX-log-vband-js-c0.5` = 0.5, `TOX-log-vband-js-c1` = 1),
+                    adapt = c(`TOX-log-adapt-r0.25` = 0.25, `TOX-log-adapt-r0.5` = 0.5, `TOX-log-adapt-r1` = 1)),
+  # Note E v2 section 6 (PROPOSAL until the owner confirms; note F adopts it), Part RS.
+  # "In at least 5 of 6 cohorts" is applied as n_cohorts - 1.
+  gate = list(cal_margin = 0.01,      # calibration: p_le05_null <= comparator + this
+              tail_001 = 0.002,       # tail: p_le001_null <= this ...
+              tail_01 = 0.015,        # ... and p_le01_null <= this
+              fdr_max = 0.075,        # FDR: fdr_nom_05 <= this
+              auprc_gain = 0.02),     # shrinkage helps: AUPRC excess gain
+  # Note G section 6 (confirmed 28/10/2026): an imbalance flag only if the FPR
+  # enrichment (p <= 0.01) of the null-calibrated top 5 % is >= 2 with a CI above 1
+  # in >= 4 of 6 cohorts, AND removing flagged genes lowers FDR without costing more
+  # than 0.02 TPR.
+  flag_rule = list(enrichment = 2, cohort_share = 4 / 6, alpha = 0.01, tpr_cost = 0.02)
 )
 dir.create(RCFG$out_dir, showWarnings = FALSE, recursive = TRUE)
 
@@ -126,13 +138,14 @@ REF_METHODS <- c("limma", "edgeR", "DESeq2")
 #' Composite encoding for many methods (plots 11-14): colour = family (fixed slots,
 #' so the 8-slot palette is never exceeded), line type = member of the family. Both
 #' scales are keyed by method, so ggplot merges them into one legend entry per method.
+VM_FAMILIES <- c("reference tools", "A: band", "B: cross-fit", "C: adaptive")
 vm_family <- function(m) ifelse(m %in% REF_METHODS, "reference tools",
-                         ifelse(grepl("vband", m), "A: vband",
-                         ifelse(grepl("vshrunk", m), "B: vshrunk", sub("\\|.*$", "", m))))
+                         ifelse(grepl("adapt", m), "C: adaptive",
+                         ifelse(grepl("xfit", m), "B: cross-fit",
+                         ifelse(grepl("vband", m), "A: band", sub("\\|.*$", "", m)))))
 vm_style <- function(m) {
   fam <- vm_family(m)
-  lv  <- c("reference tools", "A: vband", "B: vshrunk",
-           setdiff(sort(unique(fam)), c("reference tools", "A: vband", "B: vshrunk")))
+  lv  <- c(VM_FAMILIES, setdiff(sort(unique(fam)), VM_FAMILIES))
   o <- order(match(fam, lv), match(m, RCFG$vmatch_methods), m); m <- m[o]; fam <- fam[o]
   slot <- ave(seq_along(m), fam, FUN = seq_along)
   list(methods = m, col = setNames(PALETTE[match(fam, lv)], m),
@@ -150,6 +163,8 @@ read_manifests <- function(dir) {
   m <- do.call(rbind, lapply(m, function(d) { d[setdiff(cols, names(d))] <- NA; d[cols] }))
   m$part <- as.character(m$part); m$cohort <- as.character(m$cohort)
   m$delta_target <- as.numeric(m$delta_target)
+  if (is.null(m$rho)) m$rho <- 1                # runs before Part U had no rho column
+  m$rho[is.na(m$rho)] <- 1
   m
 }
 
@@ -163,7 +178,12 @@ job_metrics <- function(job) {
   tk <- tr[tr$kept, ]
   meta <- job[, setdiff(names(job), c("git_commit", "cohort_file")), drop = FALSE]
   n_de_total <- sum(tr$is_de)
-  out <- list(metrics = list(), curve = list(), pr = list(), strata = list(), radius = list())
+  out <- list(metrics = list(), curve = list(), pr = list(), strata = list(), radius = list(),
+              decile = list(), vcorr = list(), vbins = list(), venrich = list(), vflag = list())
+  # Note G: the method-independent variance file, when the job wrote one.
+  vf <- file.path(d, sprintf("vdiag_%s.csv.gz", job$job_id))
+  vq <- if (file.exists(vf)) { v <- rd(vf); vdiag_quantities(v[match(tk$gene, v$gene), ]) }
+  thr <- if (is.null(job$vd_thr)) NA_real_ else job$vd_thr
   for (m in unique(rs$method)) {
     r <- rs[rs$method == m, ]
     # Pairing check (note D WP3): every method must have scored exactly the kept genes.
@@ -177,6 +197,12 @@ job_metrics <- function(job) {
     out$curve[[m]]  <- add(curve_one(r, tk$is_de))
     out$pr[[m]]     <- add(curve_pr_one(r, tk$is_de))
     out$strata[[m]] <- add(strata_one(r, tk$is_de, tk$true_lfc, tk$expr))
+    out$decile[[m]] <- add(decile_one(r, tk$is_de, tk$expr))
+    if (!is.null(vq)) {
+      g <- vdiag_round(vq, r, tk$is_de, thr)
+      out$vcorr[[m]] <- add(g$corr); out$vbins[[m]] <- add(g$bins)
+      out$venrich[[m]] <- add(g$enrich); out$vflag[[m]] <- add(g$flag)
+    }
   }
   lapply(out, function(x) do.call(rbind, x))
 }
@@ -227,18 +253,19 @@ paired_vs_tox <- function(M) {
   if (length(out)) do.call(rbind, out)
 }
 
-#' Note D WP4: model B minus model A at equal c (RCFG$b_vs_a), paired per round,
+#' Paired per-round differences between variance arms (RCFG$pairs: arm minus ref),
 #' with SE and t = mean / SE. Every part where both arms ran.
-paired_b_vs_a <- function(M, cols = c("auprc_excess_pe", "tpr_nom_05", "fdr_nom_05", "p_le05_null", "any_call_05")) {
-  out <- lapply(RCFG$b_vs_a, function(pr) {
-    if (!all(pr %in% M$method)) return(NULL)
-    X <- merge(M[M$method == pr[["B"]], c(CELL, "round", cols)], M[M$method == pr[["A"]], c(CELL, "round", cols)],
-               by = c(CELL, "round"), suffixes = c("", ".A"))
+paired_arms <- function(M, cols = c("auprc_excess_pe", "tpr_nom_05", "fdr_nom_05", "p_le05_null",
+                                    "p_le001_null", "any_call_05")) {
+  cols <- intersect(cols, names(M))
+  out <- lapply(RCFG$pairs, function(pr) {
+    if (!all(c(pr[["arm"]], pr[["ref"]]) %in% M$method)) return(NULL)
+    X <- merge(M[M$method == pr[["arm"]], c(CELL, "round", cols)], M[M$method == pr[["ref"]], c(CELL, "round", cols)],
+               by = c(CELL, "round"), suffixes = c("", ".ref"))
     if (!nrow(X)) return(NULL)
-    for (c in cols) X[[paste0("d_", c)]] <- X[[c]] - X[[paste0(c, ".A")]]
-    X$pair <- sprintf("B c%g - A c%g", RCFG$vmatch_c[[pr[["B"]]]], RCFG$vmatch_c[[pr[["A"]]]])
-    X$method <- pr[["B"]]; X$method_A <- pr[["A"]]
-    a <- mean_se(X, c(CELL, "pair", "method", "method_A"), paste0("d_", cols))
+    for (c in cols) X[[paste0("d_", c)]] <- X[[c]] - X[[paste0(c, ".ref")]]
+    X$pair <- pr[["label"]]; X$method <- pr[["arm"]]; X$method_ref <- pr[["ref"]]
+    a <- mean_se(X, c(CELL, "pair", "method", "method_ref"), paste0("d_", cols))
     for (c in cols) a[[paste0("d_", c, "_t")]] <- a[[paste0("d_", c, "_mean")]] / a[[paste0("d_", c, "_se")]]
     a
   })
@@ -266,79 +293,71 @@ rs_checks <- function(man) {
   }))
 }
 
-#' Note D section 6, the confirmed decision protocol, on Part RS (per base cohort,
-#' per n). Uses the per-cell means of power_summary.csv. Returns one table per step:
-#'   1 calibration: arm passes in a cohort if p_le05_null <= comparator + cal_margin;
-#'     the arm passes at n if it passes in >= n_cohorts - 1 cohorts
-#'   2 c per family and n: the smallest c in the grid that passes step 1
-#'   3 power at that c (pi1 = 0.1): improvement if d AUPRC excess >= auprc_gain in
-#'     >= n_cohorts - 1 cohorts, no cohort below -auprc_loss, and fdr_nom_05 <=
-#'     comparator + fdr_margin in every cohort; gaps to limma / edgeR / DESeq2 shown
-#'   4 B (its c) vs A (its c): B better if d AUPRC excess >= auprc_gain in
-#'     >= n_cohorts - 1 cohorts and B's p_le05_null <= A's + b_cal_margin in every cohort
-rs_gates <- function(S) {
+#' Note E v2 section 6 (PROPOSAL; note F section 7 adopts it) on Part RS, per base
+#' cohort and n, from the per-cell means of power_summary.csv:
+#'   gates     per arm and n: calibration (p_le05_null <= comparator + cal_margin),
+#'             tail (p_le001_null <= tail_001 and p_le01_null <= tail_01; null arm),
+#'             FDR (fdr_nom_05 <= fdr_max; power arm), each in >= n_cohorts - 1 cohorts
+#'   choice    free parameters (RCFG$param_grid): the smallest value passing the
+#'             calibration and tail gates, per n (pi1 = 0 rounds only)
+#'   shrink    xfit-js vs xfit-raw per n: shrinkage helps if the FDR gate passes with
+#'             and not without, or AUPRC excess rises by >= auprc_gain in >= need
+#'             cohorts while xfit-js passes calibration and tail; "not needed" at n if
+#'             xfit-raw passes all three gates and the gain is not reached
+#'   not_needed_from  the smallest n from which "not needed" holds for every larger n
+gates_ev2 <- function(S) {
   S <- S[S$part == "RS", ]
   comp <- RCFG$vmatch_comparator[["RS"]]
-  arms <- intersect(names(RCFG$vmatch_c), unique(S$method))
-  if (!nrow(S) || !comp %in% S$method || !length(arms)) return(NULL)
-  g <- RCFG$gate; fam <- ifelse(grepl("vband", arms), "A", "B"); names(fam) <- arms
-  val <- function(pi0, m, col) {               # cohort-indexed vector of a mean
-    x <- S[S$method == m & (if (pi0) S$pi1 == 0 else S$pi1 > 0), ]
-    setNames(x[[paste0(col, "_mean")]], paste(x$cohort, x$n_rep))
+  if (!nrow(S) || !comp %in% S$method) return(NULL)
+  g <- RCFG$gate
+  arms <- intersect(c(comp, RCFG$vmatch_methods), unique(S$method))
+  get <- function(pi0, m, col, n) {
+    x <- S[S$method == m & S$n_rep == n & (if (pi0) S$pi1 == 0 else S$pi1 > 0), ]
+    setNames(x[[paste0(col, "_mean")]], x$cohort)
   }
-  key <- function(pi0, n) { x <- S[S$method == comp & (if (pi0) S$pi1 == 0 else S$pi1 > 0) & S$n_rep == n, ]
-    paste(x$cohort, x$n_rep) }
   ns <- sort(unique(S$n_rep))
-  # Step 1
-  s1 <- do.call(rbind, lapply(ns, function(n) do.call(rbind, lapply(arms, function(a) {
-    k <- key(TRUE, n); if (!length(k)) return(NULL)
-    d <- val(TRUE, a, "p_le05_null")[k] - val(TRUE, comp, "p_le05_null")[k]
-    need <- max(1L, length(k) - 1L)
-    data.frame(step = 1L, n_rep = n, family = fam[[a]], c = RCFG$vmatch_c[[a]], method = a,
-               n_cohorts = length(k), need = need, n_pass = sum(d <= g$cal_margin, na.rm = TRUE),
-               d_p_le05_max = max(d, na.rm = TRUE), pass = sum(d <= g$cal_margin, na.rm = TRUE) >= need)
+  gates <- do.call(rbind, lapply(ns, function(n) do.call(rbind, lapply(arms, function(a) {
+    p05 <- get(TRUE, a, "p_le05_null", n)
+    fdr <- get(FALSE, a, "fdr_nom_05", n)
+    co <- union(names(p05), names(fdr)); if (!length(co)) return(NULL)
+    need <- max(1L, length(co) - 1L)
+    cal <- sum(p05 - get(TRUE, comp, "p_le05_null", n)[names(p05)] <= g$cal_margin, na.rm = TRUE)
+    tl  <- sum(get(TRUE, a, "p_le001_null", n) <= g$tail_001 & get(TRUE, a, "p_le01_null", n) <= g$tail_01,
+               na.rm = TRUE)
+    fg  <- sum(fdr <= g$fdr_max, na.rm = TRUE)
+    mx <- function(x) if (any(is.finite(x))) max(x, na.rm = TRUE) else NA_real_
+    data.frame(n_rep = n, method = a, n_cohorts = length(co), need = need,
+               n_cal = cal, n_tail = tl, n_fdr = fg,
+               p_le001_null_max = mx(get(TRUE, a, "p_le001_null", n)), p_le01_null_max = mx(get(TRUE, a, "p_le01_null", n)),
+               fdr_nom_05_max = mx(fdr),
+               cal_gate = length(p05) > 0 && cal >= need, tail_gate = length(p05) > 0 && tl >= need,
+               fdr_gate = length(fdr) > 0 && fg >= need)
   }))))
-  if (is.null(s1)) return(NULL)
-  # Step 2
-  s2 <- do.call(rbind, lapply(split(s1, list(s1$family, s1$n_rep), drop = TRUE), function(d) {
-    ok <- d[d$pass, ]
-    data.frame(step = 2L, n_rep = d$n_rep[1], family = d$family[1],
-               c = if (nrow(ok)) min(ok$c) else NA_real_,
-               method = if (nrow(ok)) ok$method[which.min(ok$c)] else NA_character_,
-               pass = nrow(ok) > 0)
+  if (is.null(gates)) return(NULL)
+  passes <- function(m, n, cols) { r <- gates[gates$method == m & gates$n_rep == n, ]
+    nrow(r) == 1L && all(unlist(r[cols])) }
+  choice <- do.call(rbind, lapply(names(RCFG$param_grid), function(fam) do.call(rbind, lapply(ns, function(n) {
+    grid <- RCFG$param_grid[[fam]]; grid <- grid[names(grid) %in% gates$method]
+    if (!length(grid)) return(NULL)
+    ok <- grid[vapply(names(grid), passes, logical(1), n = n, cols = c("cal_gate", "tail_gate"))]
+    data.frame(family = fam, n_rep = n, chosen = if (length(ok)) names(ok)[which.min(ok)] else NA_character_,
+               value = if (length(ok)) min(ok) else NA_real_)
+  }))))
+  js <- "TOX-log-xfit-js"; raw <- "TOX-log-xfit-raw"
+  shrink <- if (all(c(js, raw) %in% gates$method)) do.call(rbind, lapply(ns, function(n) {
+    gain <- get(FALSE, js, "auprc_excess_pe", n); gain <- gain - get(FALSE, raw, "auprc_excess_pe", n)[names(gain)]
+    need <- max(1L, length(gain) - 1L); n_gain <- sum(gain >= g$auprc_gain, na.rm = TRUE)
+    helps <- (passes(js, n, "fdr_gate") && !passes(raw, n, "fdr_gate")) ||
+             (n_gain >= need && passes(js, n, c("cal_gate", "tail_gate")))
+    data.frame(n_rep = n, n_cohorts = length(gain), need = need, n_auprc_gain = n_gain,
+               d_auprc_excess_mean = mean(gain, na.rm = TRUE), shrinkage_helps = helps,
+               not_needed = passes(raw, n, c("cal_gate", "tail_gate", "fdr_gate")) && n_gain < need)
   }))
-  # Step 3 (per cohort rows + one verdict row per family and n)
-  s3 <- do.call(rbind, lapply(seq_len(nrow(s2)), function(i) {
-    a <- s2$method[i]; n <- s2$n_rep[i]; if (is.na(a)) return(NULL)
-    k <- key(FALSE, n); if (!length(k)) return(NULL)
-    dA <- val(FALSE, a, "auprc_excess_pe")[k] - val(FALSE, comp, "auprc_excess_pe")[k]
-    dF <- val(FALSE, a, "fdr_nom_05")[k] - val(FALSE, comp, "fdr_nom_05")[k]
-    gap <- function(r) val(FALSE, a, "auprc_excess_pe")[k] - val(FALSE, r, "auprc_excess_pe")[k]
-    need <- max(1L, length(k) - 1L)
-    pass <- sum(dA >= g$auprc_gain, na.rm = TRUE) >= need && all(dA >= -g$auprc_loss, na.rm = TRUE) &&
-            all(dF <= g$fdr_margin, na.rm = TRUE)
-    data.frame(step = 3L, n_rep = n, family = s2$family[i], c = s2$c[i], method = a,
-               cohort = c(sub(" [0-9]+$", "", k), "ALL"), need = need,
-               d_auprc_excess = c(dA, NA), n_gain = c(rep(NA, length(k)), sum(dA >= g$auprc_gain, na.rm = TRUE)),
-               d_fdr_nom_05 = c(dF, max(dF, na.rm = TRUE)),
-               tpr_nom_05 = c(val(FALSE, a, "tpr_nom_05")[k], NA), tpr_ach05 = c(val(FALSE, a, "tpr_ach05")[k], NA),
-               lfc80 = c(val(FALSE, a, "lfc80")[k], NA),
-               gap_limma = c(gap("limma"), NA), gap_edgeR = c(gap("edgeR"), NA), gap_DESeq2 = c(gap("DESeq2"), NA),
-               pass = c(rep(NA, length(k)), pass))
-  }))
-  # Step 4
-  s4 <- do.call(rbind, lapply(ns, function(n) {
-    a <- s2$method[s2$family == "A" & s2$n_rep == n]; b <- s2$method[s2$family == "B" & s2$n_rep == n]
-    if (!length(a) || !length(b) || is.na(a) || is.na(b)) return(NULL)
-    k <- key(FALSE, n); k0 <- key(TRUE, n); need <- max(1L, length(k) - 1L)
-    dA <- val(FALSE, b, "auprc_excess_pe")[k] - val(FALSE, a, "auprc_excess_pe")[k]
-    dC <- val(TRUE, b, "p_le05_null")[k0] - val(TRUE, a, "p_le05_null")[k0]
-    data.frame(step = 4L, n_rep = n, method = b, method_A = a, need = need,
-               n_gain = sum(dA >= g$auprc_gain, na.rm = TRUE), d_auprc_excess_mean = mean(dA, na.rm = TRUE),
-               d_p_le05_null_max = max(dC, na.rm = TRUE),
-               pass = sum(dA >= g$auprc_gain, na.rm = TRUE) >= need && all(dC <= g$b_cal_margin, na.rm = TRUE))
-  }))
-  list(s1 = s1, s2 = s2, s3 = s3, s4 = s4)
+  nn <- NA_real_
+  if (!is.null(shrink)) for (k in seq_len(nrow(shrink)))
+    if (all(shrink$not_needed[k:nrow(shrink)])) { nn <- shrink$n_rep[k]; break }
+  list(gates = gates, choice = choice, shrink = shrink,
+       not_needed_from = data.frame(not_needed_from_n = nn))
 }
 
 # =============================================================================
@@ -559,28 +578,29 @@ make_plots <- function(M, CU, PR, ST, PT = NULL, BA = NULL) {
     save("variance_only_nulls.png", p, w = 11, h = 6)
   }
 
-  # (10) Variance-matched arms (notes A/B) against limma and their plain comparator.
+  # (10) Variance-aware arms (notes A, F) against limma and their plain comparator.
   # Methods on x, colour = family, so the 8-slot palette is never exhausted.
-  vm_fam <- function(m) ifelse(m %in% c("limma", RCFG$vmatch_comparator), "reference",
-                        ifelse(grepl("vband", m), "A: vband", "B: vshrunk"))
+  vm_fam <- function(m) ifelse(m %in% c("limma", RCFG$vmatch_comparator), "reference", vm_family(m))
   vm_mets <- list(`P+` = c(p_le05_null = "null arm: P(p <= 0.05)", fdr_nom_05 = "FDR @ nominal 0.05",
                            tpr_ach05 = "TPR @ achieved FDR 0.05", auprc_excess_pe = "AUPRC excess"),
                   V    = c(fpr_hv05 = "FPR hypervariable nulls", fpr_nonhv05 = "FPR ordinary nulls",
                            fdr_nom_05 = "FDR @ nominal 0.05", tpr_ach05 = "TPR @ achieved FDR 0.05"),
                   R    = c(fdr_nom_05 = "FDR @ nominal 0.05", tpr_ach05 = "TPR @ achieved FDR 0.05",
                            auprc_excess_pe = "AUPRC excess", frac_short_pool = "frac short pool"),
-                  RS   = c(p_le05_null = "null arm: P(p <= 0.05)", any_call_05 = "null arm: P(any BH call)",
-                           fdr_nom_05 = "FDR @ nominal 0.05", auprc_excess_pe = "AUPRC excess"))
+                  RS   = c(p_le05_null = "null arm: P(p <= 0.05)", p_le001_null = "null arm: P(p <= 0.001)",
+                           fdr_nom_05 = "FDR @ nominal 0.05", auprc_excess_pe = "AUPRC excess"),
+                  U    = c(p_le05_null = "null arm: P(p <= 0.05)", p_le001_null = "null arm: P(p <= 0.001)",
+                           fdr_nom_05 = "FDR @ nominal 0.05", tpr_nom_05 = "TPR @ nominal 0.05"))
   vm_keys <- list(`P+` = c("dist", "n_rep", "sigma_d"), V = c("n_rep", "het"), R = c("cohort", "n_rep"),
-                  RS = c("cohort", "n_rep"))
-  null_mets <- c("p_le05_null", "any_call_05")
+                  RS = c("cohort", "n_rep"), U = c("dist", "n_rep", "rho"))
+  null_mets <- c("p_le05_null", "p_le001_null", "any_call_05")
   for (pt in intersect(names(vm_mets), unique(M$part))) {
     meth <- c("limma", RCFG$vmatch_comparator[[pt]], RCFG$vmatch_methods)
     d <- M[M$part == pt & M$method %in% meth, ]
     if (!any(d$method %in% RCFG$vmatch_methods)) next
     mets <- vm_mets[[pt]]
     lg <- do.call(rbind, lapply(names(mets), function(mt) {
-      dd <- if (mt %in% null_mets) d[d$pi1 == 0, ] else if (pt %in% c("P+", "RS")) d[d$pi1 > 0, ] else d
+      dd <- if (mt %in% null_mets) d[d$pi1 == 0, ] else if (pt %in% c("P+", "RS", "U")) d[d$pi1 > 0, ] else d
       if (!nrow(dd)) return(NULL)
       a <- mean_se(dd, c(vm_keys[[pt]], "method"), mt)
       data.frame(a[c(vm_keys[[pt]], "method")], metric = mets[[mt]],
@@ -592,14 +612,18 @@ make_plots <- function(M, CU, PR, ST, PT = NULL, BA = NULL) {
     lg$cell <- do.call(paste, c(lapply(vm_keys[[pt]], function(k) paste0(k, "=", lg[[k]])), sep = ", "))
     p <- ggplot(lg, aes(method, v, colour = family)) +
       geom_pointrange(aes(ymin = v - se, ymax = v + se), size = 0.25) +
-      { if (any(grepl("FDR|P\\(p|FPR|any BH", lg$metric)))
-          geom_hline(data = data.frame(metric = unique(grep("FDR|P\\(p|FPR|any BH", lg$metric, value = TRUE)), y = 0.05),
+      { if (any(grepl("FDR|0.05\\)|FPR|any BH", lg$metric)))
+          geom_hline(data = data.frame(metric = unique(grep("FDR|0.05\\)|FPR|any BH", lg$metric, value = TRUE)), y = 0.05),
                      aes(yintercept = y), colour = "grey55") } +
-      scale_colour_manual(values = c(reference = PALETTE[1], `A: vband` = PALETTE[2], `B: vshrunk` = PALETTE[3])) +
+      { if (any(grepl("0.001", lg$metric)))
+          geom_hline(data = data.frame(metric = unique(grep("0.001", lg$metric, value = TRUE)), y = 0.001),
+                     aes(yintercept = y), colour = "grey55") } +
+      scale_colour_manual(values = c(reference = PALETTE[1], `A: band` = PALETTE[2], `B: cross-fit` = PALETTE[3],
+                                     `C: adaptive` = PALETTE[4])) +
       facet_grid(metric ~ cell, scales = "free_y") +
-      labs(title = sprintf("Part %s: variance-matched neighbourhood (notes A/B) vs %s and limma",
+      labs(title = sprintf("Part %s: variance-aware arms (notes A, F) vs %s and limma",
                            pt, RCFG$vmatch_comparator[[pt]]),
-           subtitle = "c_tau is chosen on calibration only (null halves, P+ pi1 = 0); paired differences in power_paired_vs_tox.csv",
+           subtitle = "Free parameters are chosen on the pi1 = 0 rounds only; paired differences in power_paired_vs_tox.csv / power_paired_arms.csv",
            x = NULL, y = NULL, colour = NULL) +
       th + theme(axis.text.x = element_text(angle = 45, hjust = 1))
     save(sprintf("variance_match_%s.png", gsub("[^A-Za-z]", "plus", pt)), p,
@@ -655,7 +679,7 @@ make_plots <- function(M, CU, PR, ST, PT = NULL, BA = NULL) {
       geom_hline(yintercept = 0.05, colour = "grey55") +
       geom_pointrange(aes(ymin = p_le05_null_mean - p_le05_null_se, ymax = p_le05_null_mean + p_le05_null_se),
                       position = position_dodge(0.5), size = 0.25) +
-      scale_colour_manual(values = PALETTE[1:2]) + facet_wrap(~ cohort) +
+      scale_colour_manual(values = PALETTE) + facet_wrap(~ cohort) +
       labs(title = "Part RS: null calibration on real data at small n (pi1 = 0)",
            subtitle = "Fraction of null genes with raw p <= 0.05, mean +/- SE over rounds. Line = 0.05.",
            x = NULL, y = "P(p <= 0.05 | null)", colour = "n per group") +
@@ -663,7 +687,7 @@ make_plots <- function(M, CU, PR, ST, PT = NULL, BA = NULL) {
     save("rs_null_calibration.png", p, w = 14, h = 8)
   }
 
-  # (13) Sample-size curve (note D WP6b): RS (n = 3, 5) and R (n = S %/% 2) of the
+  # (13) Sample-size curve (note D WP6b): RS (n = 3, 5, 7, 10) and R (n = S %/% 2) of the
   # same base cohort, power arm (pi1 = 0.1), methods run in both parts.
   both <- intersect(rs_m, unique(M$method[M$part == "R"]))
   sz <- M[M$part %in% c("R", "RS") & M$pi1 > 0 & M$method %in% both, ]
@@ -709,13 +733,107 @@ make_plots <- function(M, CU, PR, ST, PT = NULL, BA = NULL) {
     p <- ggplot(lg, aes(arm, v, colour = n)) +
       geom_hline(yintercept = 0, colour = "grey55") +
       geom_pointrange(aes(ymin = v - se, ymax = v + se), position = position_dodge(0.5), size = 0.2) +
-      scale_colour_manual(values = PALETTE[1:2]) +
+      scale_colour_manual(values = PALETTE) +
       facet_grid(metric ~ cohort, scales = "free_y") +
       labs(title = "Part RS: paired per-round differences, mean +/- SE",
-           subtitle = "'<arm> - TOX' = variance arm minus TOX-log|TPM-centred; 'B .. - A ..' = model B minus model A at equal c.",
+           subtitle = "'<arm> - TOX' = variance arm minus TOX-log|TPM-centred; other labels: RCFG$pairs (arm minus ref).",
            x = NULL, y = NULL, colour = "n per group") +
       th + theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 6))
     save("rs_paired_differences.png", p, w = 18, h = 10)
+  }
+}
+
+#' Notes F and G plots: calibration and power by expression decile (F section 7),
+#' Part U against rho, and note G's FPR by decile of |L|, L and v and its rank
+#' correlations. DC, VC, VB: the aggregated decile, correlation and bin tables.
+make_plots_fg <- function(M, DC, VC, VB) {
+  dir <- RCFG$out_dir
+  th <- theme_bw(base_size = 9) + theme(legend.position = "bottom", panel.grid.minor = element_blank())
+  save <- function(name, p, w = 10, h = 9) ggsave(file.path(dir, name), p, width = w, height = h, dpi = 150)
+  show_m <- function(m) m[m %in% c(REF_METHODS, RCFG$vmatch_comparator, "TOX-log-vband-c3", "TOX-log-xfit-raw",
+                                   "TOX-log-xfit-js", "TOX-log-xfit-js-loess", "TOX-log-adapt-r0.5")]
+
+  # (15) By expression decile (Parts RS, R): FDR and TPR at nominal 0.05 on the
+  # power arm, P(p <= 0.001) on the null arm; averaged over base cohorts (display).
+  for (pt in intersect(c("RS", "R"), unique(DC$part))) {
+    d <- DC[DC$part == pt & DC$method %in% show_m(unique(DC$method)), ]
+    if (!nrow(d)) next
+    lg <- rbind(
+      data.frame(d[d$pi1 > 0, c("n_rep", "method", "expr_decile")], metric = "FDR @ nominal 0.05",
+                 v = d$fdr_nom_05_mean[d$pi1 > 0]),
+      data.frame(d[d$pi1 > 0, c("n_rep", "method", "expr_decile")], metric = "TPR @ nominal 0.05",
+                 v = d$tpr_nom_05_mean[d$pi1 > 0]),
+      if (any(d$pi1 == 0)) data.frame(d[d$pi1 == 0, c("n_rep", "method", "expr_decile")],
+                                      metric = "null arm: P(p <= 0.001)", v = d$p_le001_null_mean[d$pi1 == 0]))
+    lg <- aggregate(v ~ n_rep + method + expr_decile + metric, lg, mean)
+    st <- vm_style(unique(lg$method)); lg$method <- factor(lg$method, levels = st$methods)
+    p <- ggplot(lg, aes(expr_decile, v, colour = method, linetype = method)) +
+      geom_line(linewidth = 0.5) + geom_point(size = 1.2) +
+      scale_colour_manual(values = st$col, name = NULL) + scale_linetype_manual(values = st$lty, name = NULL) +
+      facet_grid(metric ~ n_rep, scales = "free_y", labeller = labeller(n_rep = label_both)) +
+      labs(title = sprintf("Part %s: calibration and power by expression decile (1 = lowest)", pt),
+           subtitle = "Mean over base cohorts and rounds (display only; per-cohort values in power_by_decile.csv).",
+           x = "expression decile", y = NULL) + th + theme(legend.key.width = unit(1.8, "lines"))
+    save(sprintf("by_decile_%s.png", pt), p, w = 14, h = 9)
+  }
+
+  # (16) Part U: the equal-variance assumption of the cross-fitted scaling.
+  if (any(M$part == "U")) {
+    u <- M[M$part == "U", ]
+    mets <- c(p_le05_null = "null arm: P(p <= 0.05)", p_le001_null = "null arm: P(p <= 0.001)",
+              fdr_nom_05 = "FDR @ nominal 0.05", tpr_nom_05 = "TPR @ nominal 0.05")
+    lg <- do.call(rbind, lapply(names(mets), function(mt) {
+      dd <- if (grepl("null", mt)) u[u$pi1 == 0, ] else u[u$pi1 > 0, ]
+      if (!nrow(dd)) return(NULL)
+      a <- mean_se(dd, c("dist", "n_rep", "rho", "method"), mt)
+      data.frame(a[c("dist", "n_rep", "rho", "method")], metric = mets[[mt]], v = a[[paste0(mt, "_mean")]])
+    }))
+    st <- vm_style(unique(lg$method)); lg$method <- factor(lg$method, levels = st$methods)
+    p <- ggplot(lg, aes(rho, v, colour = method, linetype = method)) +
+      geom_line(linewidth = 0.5) + geom_point(size = 1.2) +
+      scale_colour_manual(values = st$col, name = NULL) + scale_linetype_manual(values = st$lty, name = NULL) +
+      facet_grid(metric ~ dist + n_rep, scales = "free_y", labeller = label_both) +
+      labs(title = "Part U: case extra-Poisson SD = rho x control SD (equal-variance assumption of the cross-fit)",
+           x = "rho", y = NULL) + th + theme(legend.key.width = unit(1.8, "lines"))
+    save("unequal_variance_rho.png", p, w = 14, h = 9)
+  }
+
+  # (17) Note G: FPR (p <= 0.01) of true negatives by decile of |L|, L and v, per n
+  # (rows: methods); and the rank correlations per cohort and n.
+  if (!is.null(VB) && nrow(VB)) for (pt in intersect(c("RS", "P+", "R"), unique(VB$part))) {
+    d <- VB[VB$part == pt & VB$method %in% show_m(unique(VB$method)), ]
+    if (pt == "P+") d <- d[d$pi1 == 0, ]
+    if (!nrow(d)) next
+    a <- aggregate(fpr_01_mean ~ n_rep + method + quantity + decile, d, mean)
+    p <- ggplot(a, aes(decile, fpr_01_mean, colour = quantity)) +
+      geom_hline(yintercept = 0.01, colour = "grey55") +
+      geom_line(linewidth = 0.5) + geom_point(size = 1.2) +
+      scale_colour_manual(values = PALETTE[1:3]) +
+      facet_grid(method ~ n_rep, labeller = labeller(n_rep = label_both)) +
+      labs(title = sprintf("Part %s: share of true negatives with p <= 0.01 by decile of |L|, L and v (note G A2)", pt),
+           subtitle = "L: group variance imbalance; v: overall relative noise. Line = 0.01. Mean over cohorts and rounds.",
+           x = "decile (1 = lowest)", y = "FPR at p <= 0.01", colour = NULL) +
+      th + theme(strip.text.y = element_text(angle = 0, size = 6))
+    save(sprintf("vdiag_fpr_by_decile_%s.png", gsub("[^A-Za-z]", "plus", pt)), p,
+         w = 12, h = 1.6 * length(unique(a$method)) + 2)
+  }
+  if (!is.null(VC) && nrow(VC)) {
+    d <- VC[VC$part %in% c("RS", "R") & VC$method %in% show_m(unique(VC$method)), ]
+    if (nrow(d)) {
+      lg <- do.call(rbind, lapply(c("rho_signed", "rho_abs", "rho_overall"), function(q)
+        data.frame(d[c("part", "cohort", "n_rep", "pi1", "method")], quantity = q,
+                   v = d[[paste0(q, "_mean")]], se = d[[paste0(q, "_se")]])))
+      lg$cell <- paste0(lg$part, " n=", lg$n_rep, " pi1=", lg$pi1)
+      p <- ggplot(lg, aes(method, v, colour = quantity)) +
+        geom_hline(yintercept = 0, colour = "grey55") +
+        geom_pointrange(aes(ymin = v - se, ymax = v + se), position = position_dodge(0.6), size = 0.2) +
+        scale_colour_manual(values = PALETTE[1:3]) + facet_grid(cell ~ cohort) +
+        labs(title = "Note G A1: Spearman correlation of |L|, L, v with the p-value among true negatives",
+             subtitle = "Mean +/- SE over rounds. Negative = larger value goes with smaller p (more false positives). Read against the P+ pi1 = 0 baseline (variance_diagnostic_corr.csv).",
+             x = NULL, y = "Spearman rho", colour = NULL) +
+        th + theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 6), strip.text.y = element_text(angle = 0))
+      save("vdiag_rank_correlation.png", p, w = 18, h = 2 * length(unique(lg$cell)) + 3)
+    }
   }
 }
 
@@ -755,21 +873,24 @@ report_part <- function(S, pt) {
   x <- S[S$part == pt, ]
   meth <- vm_style(unique(x$method))$methods
   lab <- if (pt %in% names(PART_LABEL)) paste0(" -- ", PART_LABEL[[pt]]) else ""
-  power <- c("tpr_nom_05", "fdr_nom_05", "tpr_ach05", "auprc_excess_pe", if (pt == "V") c("fpr_hv05", "fpr_nonhv05"))
-  null  <- c("p_le05_null", "any_call_05", "ks_null")
+  power <- c("tpr_nom_05", "fdr_nom_05", "fdr_nom_10", "tpr_ach05", "auprc_excess_pe",
+             if (pt == "V") c("fpr_hv05", "fpr_nonhv05"))
+  null  <- c("p_le05_null", "p_le01_null", "p_le001_null", "any_call_05", "ks_null")
   has0 <- any(x$pi1 == 0)
   pv <- function(d, mt, arm) print_pivot(d, paste0(mt, "_mean"), methods = meth, csv = "power_summary.csv",
                                          title = sprintf("PART %s%s | %s%s", pt, arm, mt, lab))
   if (has0) for (mt in null) pv(x[x$pi1 == 0, ], mt, " null arm (pi1 = 0)")
   if (any(x$pi1 > 0 | is.na(x$pi1))) for (mt in power) pv(x[!x$pi1 %in% 0, ], mt, if (has0) " power arm" else "")
   vm <- x[x$method %in% RCFG$vmatch_methods, ]
-  if (nrow(vm)) for (mt in c("frac_short_pool", "n_scanned_median", "scan_radius_median", "frac_radius_gt2"))
+  if (nrow(vm)) for (mt in c("frac_short_pool", "n_scanned_median", "lambda_pool", "lambda_case", "lambda_control",
+                             "p_hat", "participation_ratio", "radius_median", "frac_stop_2", "frac_stop_3",
+                             "frac_stop_4"))
     if (any(is.finite(vm[[paste0(mt, "_mean")]])))
       print_pivot(vm[!vm$pi1 %in% 0 | !has0, ], paste0(mt, "_mean"), methods = meth, csv = "power_summary.csv",
                   title = sprintf("PART %s | variance arms: %s", pt, mt))
 }
 
-report <- function(S, PV, OG, PD, BK, RC, PT, BA, RSC, GT, M) {
+report <- function(S, PV, OG, PD, BK, RC, PT, BA, RSC, GT, M, VG = NULL) {
   for (pt in intersect(ALL_PART_ORDER, unique(S$part))) report_part(S, pt)
   cat("\n  tpr_ach05   TPR at ACHIEVED FDR 0.05 (truth-thresholded, max over steps; not user-realisable).\n",
       "  tpr_nom_05 / fdr_nom_05  what a user gets at nominal 0.05; fdr zero-filled.\n",
@@ -791,8 +912,8 @@ report <- function(S, PV, OG, PD, BK, RC, PT, BA, RSC, GT, M) {
                               "VARIANCE ARMS minus their plain TOX comparator (paired; SE in the CSV)",
                               csv = "power_paired_vs_tox.csv", keys = c(PRINT_KEYS, "comparator"))
   if (!is.null(BA)) print_tab(BA[, c(CELL, "pair", grep("^d_.*_(mean|t)$", names(BA), value = TRUE))],
-                              "MODEL B minus MODEL A at equal c (paired; t = mean / SE)",
-                              csv = "power_paired_B_vs_A.csv", keys = c(PRINT_KEYS, "pair"))
+                              "VARIANCE ARM PAIRS, arm minus ref (paired; t = mean / SE)",
+                              csv = "power_paired_arms.csv", keys = c(PRINT_KEYS, "pair"))
   if (!is.null(OG)) print_tab(OG, "ORACLE GAP (Part Q): oracle minus production, paired per round", csv = "power_oracle_gap.csv",
     notes = c("P3': contamination is a CALIBRATION effect -> look at d_fdr_nom_05, d_fpr_null05, d_n_called_05,",
               "d_tpr_nom_05. d_tpr_ach05 is the expected-null control (invariant to monotone p inflation)."))
@@ -814,26 +935,92 @@ report <- function(S, PV, OG, PD, BK, RC, PT, BA, RSC, GT, M) {
               "distinct_datasets should equal rounds_pi0 + rounds_pi1 (data_hash)."))
   if (!is.null(GT)) {
     nc <- length(unique(S$cohort[S$part == "RS"]))
-    cat("\n", strrep("#", 100), "\nPART RS DECISION PROTOCOL (note D section 6; ", nc,
-        " base cohorts -- every statement below is per base cohort, SEs are never pooled)\n", sep = "")
     g <- RCFG$gate
-    print_tab(GT$s1, "STEP 1  calibration (pi1 = 0): pass in a cohort if p_le05_null <= comparator + cal_margin",
-              csv = "power_rs_gates.csv", keys = c("n_rep", "family", "c", "method"),
-              notes = sprintf("cal_margin = %g; an arm passes at n if it passes in >= need cohorts", g$cal_margin))
-    print_tab(GT$s2, "STEP 2  c per family and n: smallest c that passes step 1 (NA = fails calibration at n)",
-              csv = "power_rs_gates.csv", keys = c("n_rep", "family"))
-    if (!is.null(GT$s3)) print_tab(GT$s3, "STEP 3  power at the chosen c (pi1 = 0.1), per cohort; ALL = verdict",
-              csv = "power_rs_gates.csv", keys = c("n_rep", "family", "method", "cohort"),
-              notes = sprintf("improvement: d_auprc_excess >= %g in >= need cohorts, none < -%g, d_fdr_nom_05 <= %g in every cohort; gap_* = arm minus reference",
-                              g$auprc_gain, g$auprc_loss, g$fdr_margin))
-    if (!is.null(GT$s4)) print_tab(GT$s4, "STEP 4  does shrinkage help? B (its c) vs A (its c)",
+    cat("\n", strrep("#", 100), "\nPART RS DECISION PROTOCOL (note E v2 section 6, PROPOSAL; ", nc,
+        " base cohorts -- every statement is per base cohort, SEs are never pooled)\n", sep = "")
+    print_tab(GT$gates, "GATES per arm and n: calibration, tail (null arm) and FDR (power arm), cohorts passing",
               csv = "power_rs_gates.csv", keys = c("n_rep", "method"),
-              notes = sprintf("B better: d_auprc_excess >= %g in >= need cohorts and B's p_le05_null <= A's + %g in every cohort",
-                              g$auprc_gain, g$b_cal_margin))
+              notes = sprintf("cal: p_le05_null <= comparator + %g; tail: p_le001_null <= %g and p_le01_null <= %g; FDR: fdr_nom_05 <= %g; a gate passes in >= need cohorts",
+                              g$cal_margin, g$tail_001, g$tail_01, g$fdr_max))
+    print_tab(GT$choice, "FREE PARAMETERS chosen on pi1 = 0 only: smallest value passing calibration and tail",
+              csv = "power_rs_gates.csv", keys = c("family", "n_rep"))
+    print_tab(GT$shrink, "SHRINKAGE: xfit-js vs xfit-raw per n",
+              csv = "power_rs_gates.csv", keys = "n_rep",
+              notes = sprintf("helps: FDR gate with and not without, or AUPRC excess +%g in >= need cohorts with calibration and tail; not_needed: xfit-raw passes all gates and the gain is not reached",
+                              g$auprc_gain))
+    print_tab(GT$not_needed_from, "SHRINKAGE NOT NEEDED FROM n (NA = needed at every n tested)",
+              csv = "power_rs_gates.csv", keys = character(0))
+  }
+  if (!is.null(VG)) {
+    cat("\n", strrep("#", 100), "\nNOTE G: VARIANCE IMBALANCE AND FALSE POSITIVES (read against the P+ pi1 = 0 baseline)\n", sep = "")
+    print_tab(VG$corr, "A1 Spearman(|L|, L, v ; p) among true negatives, mean over rounds",
+              csv = "variance_diagnostic_corr.csv",
+              notes = "negative = a larger value goes with a smaller p-value (more false positives)")
+    print_tab(VG$enrich_summary, "A2 FPR enrichment (p <= 0.01) of the top 5 % vs the rest, bootstrap CI over rounds",
+              csv = "variance_diagnostic_enrichment.csv", keys = c(PRINT_KEYS, "split"))
+    print_tab(VG$flag_rule, "G section 6: implement an imbalance flag? (null-calibrated flag, per part, n and method)",
+              csv = "variance_flag_utility.csv", keys = c("part", "n_rep", "method"),
+              notes = sprintf("flag if enrichment >= %g with CI above 1 in >= %d%% of cohorts AND removing flagged genes lowers FDR, TPR cost <= %g",
+                              RCFG$flag_rule$enrichment, round(100 * RCFG$flag_rule$cohort_share), RCFG$flag_rule$tpr_cost))
   }
 }
 
-ALL_PART_ORDER <- c("R", "RS", "P", "P+", "Q", "C", "S", "N", "V", "D")
+ALL_PART_ORDER <- c("R", "RS", "P", "P+", "U", "Q", "C", "S", "N", "V", "D")
+
+#' Note G thresholds: per cell without pi1 (part, cohort, n, ...), the 95th
+#' percentile of |L| pooled over its pi1 = 0 rounds ("null-calibrated").
+vd_thresholds <- function(run) {
+  z <- run[run$pi1 == 0 & run$part %in% names(RCFG$vmatch_comparator), ]
+  if (!nrow(z)) return(NULL)
+  keys <- setdiff(CELL, "pi1")
+  absl <- mclapply(split(z, seq_len(nrow(z))), function(j) {
+    f <- file.path(RCFG$raw_dir, j$part, sprintf("vdiag_%s.csv.gz", j$job_id))
+    if (!file.exists(f)) return(NULL)
+    q <- vdiag_quantities(rd(f))$absL; q[is.finite(q)]
+  }, mc.cores = RCFG$n_cores)
+  k <- do.call(paste, c(z[keys], sep = "\r"))
+  out <- lapply(split(seq_along(absl), k), function(i) {
+    v <- unlist(absl[i]); if (!length(v)) return(NULL)
+    cbind(z[i[1], keys, drop = FALSE], vd_thr = unname(quantile(v, 1 - VD$top)))
+  })
+  do.call(rbind, Filter(Negate(is.null), out))
+}
+
+#' Note G aggregation: A1 means, A2 bins and enrichment, A3 flag utility, and the
+#' section 6 flag decision.
+vdiag_summary <- function(VCr, VBr, VEr, VFr) {
+  if (is.null(VCr)) return(NULL)
+  corr <- mean_se(VCr, c(CELL, "method"), c("rho_signed", "rho_abs", "rho_overall"))
+  bins <- if (!is.null(VBr)) mean_se(VBr, c(CELL, "method", "quantity", "decile"),
+                                     c("fpr_001", "fpr_01", "fpr_05", "false_share_05"))
+  enrich <- if (!is.null(VEr)) {
+    k <- do.call(paste, c(VEr[c(CELL, "method", "split", "alpha")], sep = "\r"))
+    set.seed(1L)
+    do.call(rbind, lapply(split(VEr, k), function(d) cbind(d[1, c(CELL, "method", "split", "alpha")],
+                                                          enrichment_ci(d))))
+  }
+  flag <- if (!is.null(VFr)) {
+    VFr$d_fdr <- VFr$fdr_removed - VFr$fdr_kept; VFr$d_tpr <- VFr$tpr_removed - VFr$tpr_kept
+    mean_se(VFr, c(CELL, "method", "flag"), c("share_flagged", "share_de_flagged", "fdr_kept", "fdr_removed",
+                                              "tpr_kept", "tpr_removed", "d_fdr", "d_tpr"))
+  }
+  fr <- RCFG$flag_rule
+  rule <- if (!is.null(enrich)) {
+    e <- enrich[enrich$split == "absL_nullcal" & enrich$alpha == fr$alpha, ]
+    if (nrow(e)) do.call(rbind, lapply(split(e, list(e$part, e$n_rep, e$method), drop = TRUE), function(d) {
+      ok <- d$enrichment >= fr$enrichment & d$ci_lo > 1
+      need <- ceiling(fr$cohort_share * nrow(d))
+      f <- if (!is.null(flag)) flag[flag$part == d$part[1] & flag$n_rep == d$n_rep[1] & flag$method == d$method[1] &
+                                    flag$flag == "null_calibrated", ]
+      useful <- !is.null(f) && nrow(f) > 0 && mean(f$d_fdr_mean, na.rm = TRUE) < 0 &&
+                mean(f$d_tpr_mean, na.rm = TRUE) >= -fr$tpr_cost
+      data.frame(part = d$part[1], n_rep = d$n_rep[1], method = d$method[1], n_cohorts = nrow(d),
+                 n_enriched = sum(ok), need = need, flag_useful = useful, implement_flag = sum(ok) >= need && useful)
+    }))
+  }
+  es <- if (!is.null(enrich)) enrich[enrich$alpha == fr$alpha, ]
+  list(corr = corr, bins = bins, enrich = enrich, flag = flag, flag_rule = rule, enrich_summary = es)
+}
 
 # =============================================================================
 if (sys.nframe() == 0L) {
@@ -841,6 +1028,12 @@ if (sys.nframe() == 0L) {
   report_header(man)
   run <- man[!man$skip %in% TRUE, ]
   message(sprintf("%d jobs in %s; cores %d", nrow(run), RCFG$raw_dir, RCFG$n_cores))
+  # Note G: null-calibrated |L| thresholds from the pi1 = 0 rounds, attached per job.
+  TH <- tryCatch(vd_thresholds(run), error = function(e) { message("vdiag thresholds: ", conditionMessage(e)); NULL })
+  if (!is.null(TH)) {
+    k_run <- do.call(paste, c(run[setdiff(CELL, "pi1")], sep = "\r"))
+    run$vd_thr <- TH$vd_thr[match(k_run, do.call(paste, c(TH[setdiff(CELL, "pi1")], sep = "\r")))]
+  }
   res <- mclapply(split(run, seq_len(nrow(run))), function(j)
            tryCatch(job_metrics(j), error = function(e) {
              message("job ", j$job_id, ": ", conditionMessage(e)); NULL }),
@@ -852,6 +1045,11 @@ if (sys.nframe() == 0L) {
   PR  <- do.call(rbind, lapply(res, `[[`, "pr"))
   ST  <- do.call(rbind, lapply(res, `[[`, "strata"))
   RAD <- do.call(rbind, lapply(res, `[[`, "radius"))
+  DCr <- do.call(rbind, lapply(res, `[[`, "decile"))
+  VCr <- do.call(rbind, lapply(res, `[[`, "vcorr"))
+  VBr <- do.call(rbind, lapply(res, `[[`, "vbins"))
+  VEr <- do.call(rbind, lapply(res, `[[`, "venrich"))
+  VFr <- do.call(rbind, lapply(res, `[[`, "vflag"))
 
   skip <- c(CELL, "round", "job", "seed", "split_seed", "sigma_mult")
   num_cols <- setdiff(names(M)[vapply(M, is.numeric, logical(1))], skip)
@@ -876,9 +1074,12 @@ if (sys.nframe() == 0L) {
       frac_lfc_mismatch_mean = mean(d$frac_lfc_mismatch, na.rm = TRUE))))
   }
   PT  <- tryCatch(paired_vs_tox(M), error = function(e) { message("paired vs TOX: ", conditionMessage(e)); NULL })
-  BA  <- tryCatch(paired_b_vs_a(M), error = function(e) { message("paired B vs A: ", conditionMessage(e)); NULL })
+  BA  <- tryCatch(paired_arms(M), error = function(e) { message("paired arms: ", conditionMessage(e)); NULL })
   RSC <- rs_checks(man)
-  GT  <- tryCatch(rs_gates(S), error = function(e) { message("RS gates: ", conditionMessage(e)); NULL })
+  GT  <- tryCatch(gates_ev2(S), error = function(e) { message("RS gates: ", conditionMessage(e)); NULL })
+  DC  <- if (!is.null(DCr)) mean_se(DCr, c(CELL, "method", "expr_decile"),
+                                    c("n", "n_de", "p_le001_null", "p_le01_null", "p_le05_null", "fdr_nom_05", "tpr_nom_05"))
+  VG  <- tryCatch(vdiag_summary(VCr, VBr, VEr, VFr), error = function(e) { message("note G: ", conditionMessage(e)); NULL })
 
   w <- function(x, f) if (!is.null(x)) write.csv(x, file.path(RCFG$out_dir, f), row.names = FALSE)
   w(M, "power_per_round.csv"); w(S, "power_summary.csv"); w(PV, "power_paired_vs_ref.csv")
@@ -889,12 +1090,18 @@ if (sys.nframe() == 0L) {
   if (!is.null(RAD)) w(mean_se(RAD, c(CELL, "method", "expr_decile"), c("n", "scan_radius_median", "frac_radius_gt2")),
                        "power_scan_radius.csv")
   w(OG, "power_oracle_gap.csv"); w(PD, "power_pool_diag.csv")
-  w(PT, "power_paired_vs_tox.csv"); w(BA, "power_paired_B_vs_A.csv")
+  w(PT, "power_paired_vs_tox.csv"); w(BA, "power_paired_arms.csv"); w(DC, "power_by_decile.csv")
+  if (!is.null(VG)) {
+    w(VG$corr, "variance_diagnostic_corr.csv"); w(VG$bins, "variance_diagnostic_bins.csv")
+    w(VG$enrich, "variance_diagnostic_enrichment.csv"); w(VG$flag, "variance_flag_utility.csv")
+    w(VG$flag_rule, "variance_flag_decision.csv")
+  }
   w(BK, "power_breakdown.csv"); w(RC, "power_real_checks.csv"); w(RSC, "power_rs_checks.csv")
-  if (!is.null(GT)) w(rbind_fill(GT), "power_rs_gates.csv")
+  if (!is.null(GT)) w(rbind_fill(Map(function(x, nm) cbind(table = nm, x), GT, names(GT))), "power_rs_gates.csv")
 
-  withCallingHandlers(report(S, PV, OG, PD, BK, RC, PT, BA, RSC, GT, M), warning = function(w) {
+  withCallingHandlers(report(S, PV, OG, PD, BK, RC, PT, BA, RSC, GT, M, VG), warning = function(w) {
     message("report warning: ", conditionMessage(w)); invokeRestart("muffleWarning") })
   tryCatch(make_plots(M, CU, PR, ST, PT, BA), error = function(e) message("plotting failed: ", conditionMessage(e)))
+  tryCatch(make_plots_fg(M, DC, VG$corr, VG$bins), error = function(e) message("plotting (F/G) failed: ", conditionMessage(e)))
   cat("\nWrote CSVs and plots to ", RCFG$out_dir, "/\n", sep = "")
 }

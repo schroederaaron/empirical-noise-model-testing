@@ -141,3 +141,22 @@ test_that("pi1 = 0: DE-dependent metrics NA, calibration finite, any_call_05 = 1
   expect_identical(m$fdr_nom_05, 1)                      # complete null: FDP = 1 when anything is called
   expect_null(curve_one(mk_res(p), rep(FALSE, 1000)))
 })
+
+# ---------------------------------------------------------------- notes F / G
+
+test_that("null calibration reports p <= 0.001; CELL carries rho", {
+  expect_identical(null_calibration(c(0.0005, 0.5, 0.002, 0.9), rep(TRUE, 4))$p_le001_null, 0.25)
+  expect_true("rho" %in% CELL)
+})
+
+test_that("decile_one: per expression decile null tail, FDR and TPR of BH calls", {
+  set.seed(31); G <- 2000
+  is_de <- seq_len(G) %% 10 == 0; p <- runif(G); p[is_de] <- p[is_de] / 1e4
+  d <- decile_one(mk_res(p), is_de, expr = seq_len(G))
+  expect_identical(nrow(d), 10L); expect_equal(sum(d$n), G); expect_equal(sum(d$n_de), sum(is_de))
+  called <- p.adjust(p, "BH") < 0.05
+  expect_equal(sum(d$n_called_05), sum(called))
+  i <- 1:200                                        # decile 1 = genes 1..200
+  expect_equal(d$fdr_nom_05[1], sum(called[i] & !is_de[i]) / sum(called[i]))
+  expect_equal(d$p_le001_null[1], mean(p[i][!is_de[i]] <= 0.001))
+})

@@ -273,95 +273,124 @@ Why correct at all: on TPM `log2FC = beta − Δ` with `Δ` identical for every 
 
 The scalar suite (`test/mod_test_noise_model.f90`, 9 tests) checks the returned statistic against an independent recomputation on all four normalization regimes. `test_pipeline_beta_centre` checks `delta_hat`, the centring, the agreement of both scalar modules, and the rejection of an unknown mode.
 
-## Variance-matched model — `noise_model_variance` (implementation notes A and B)
+## Variance-aware model — `noise_model_variance` (implementation notes A and F)
 
-`src/tox/tox_noise_model_variance.F90` is the exact model with a different **neighbourhood**.
-Each gene's null is built from the `k` nearest genes in mean expression **whose matching variable
-`u` lies within `±tau_var` of the gene's own**: a two-sided variance band. Everything else is
-`noise_model_exact`'s, reused rather than copied: per-side `1/sqrt(n)` scaled residual pools, the
-exact pairwise tail count, the internally computed statistic, `log2fc`, `delta_hat` and
-`beta_centre`. The null stays empirical and non-parametric.
+`src/tox/tox_noise_model_variance.F90` is the exact model with three orthogonal switches. Everything
+else is `noise_model_exact`'s, reused rather than copied: Bessel-corrected residuals, per-side
+`1/sqrt(n)` scaled pools, the exact pairwise tail count, the internally computed statistic,
+`log2fc`, `delta_hat` and `beta_centre`. The null stays empirical; no distribution is assumed.
 
-**Matching variable.** It is computed inside the model from the replicates, on
-`L = log2(max(x,0) + 1)` whatever `norm_method` is:
-
-- pooled within-group variance `s2_g` over `d = n_case + n_control − 2` df;
-- `l_g = log(s2_g + 1e-8)`;
-- trend axis `m_g = log2(mean of the linear input over all samples + 1)`;
-- trend: robust LOESS (`span` 0.3, `degree` 1, `family = "symmetric"`, all three exposed). It
-  matches R's `stats::loess` to 5e-15.
-
-`variance_mode` selects how `u` and `tau_var` are built:
-
-| `variance_mode` | `u` | `tau_var` |
+| switch | values | meaning |
 |---|---|---|
-| 1 `"band"` (note A) | `l − S(m)`, the raw detrended log-variance | `c_tau · √ψ₁(d/2)` (0.80 / 0.53 / 0.34 × `c_tau` at n = 3 / 5 / 10 per group) |
-| 2 `"shrunk"` (note B) | `log(s2m / s0sq)`, the limma-style moderated variance over the trend prior | `c_tau · w · √ψ₁(d/2)`, with `w = d/(d + d0)` |
+| `variance_mode` (which genes enter the pools) | 0 `"mean"`, 1 `"band"`, 3 `"adaptive"` | mean-matched kNN of the exact model; note A's fixed-`k` variance band; note F's adaptive growth |
+| `match_variable` (the band's `u`) | 0 `"raw"`, 1 `"js"` | raw detrended log2-variance (note A); James-Stein-shrunk variance |
+| `scaling` (null construction) | 0 `"none"`, 1 `"xfit_raw"`, 2 `"xfit_js"`, 3 `"same_group"` | as the exact model; cross-fitted with raw / shrunk variances; benchmark-only negative control |
 
-How mode 2 builds `u`:
+With `variance_mode = "mean"` and `scaling = "none"` the model **is** the exact model (bit-identical).
 
-1. Bias-correct: `e = l − ψ(d/2) + log(d/2)`.
-2. Detrend: `T(m)` is the LOESS of `e` on `m`.
-3. Prior df `d0`: moment matching of the scatter of `e − T` against `ψ₁(d/2)`, inverted with an
-   inverse trigamma.
-4. Prior variance: `s0sq = exp(T + ψ(d0/2) − log(d0/2))`.
-5. Moderate on the VARIANCE scale: `s2m = (d0·s0sq + d·s2)/(d0 + d)`.
+### Shrinkage (James-Stein, moment-based)
 
-The scatter is `mad(r)²` (R's `mad`, MAD constant applied once) or, with `robust_var = 0`, the
-sample variance. With no excess scatter, `d0 = Inf`, `w = 0`, `u = 0` and `tau_var = 1`, and mode 2
-is **exactly** the plain exact model at fixed `k`.
+On the scale the model tests on (`y = log2(x + 1)`, or `y = x` with `norm_method = 0`):
 
-**Neighbourhood** (`gather_residuals_band_helper`):
+- group variances `s2_c`, `s2_t` (unbiased), pooled `s2` over `d = n_c + n_t − 2` df,
+  `m = log2(mean of all samples + 1)`;
+- the cross-group contrast `delta = s2_c − s2_t` gives unbiased estimates of the sampling variances
+  under equal group variances and finite fourth moments, for any distribution:
+  `Vhat_pool = (n_c−1)(n_t−1)/d² · delta²`, `Vhat_c = (n_t−1)/d · delta²`,
+  `Vhat_t = (n_c−1)/d · delta²` (exact for balanced designs, approximate otherwise);
+- target `T` (`shrink_target`): the median of `s2` (default) or the LOESS of `s2` on `m` on the
+  variance scale (non-robust by default; `shrink_loess_robust`); floored at `1e-8`. The **same** `T`
+  is the target of the pooled and of both group variances;
+- `lambda = clip(Σ w·Vhat / Σ w·(s2 − T)², 0, 1)` per variance type, with `w = 1/T²`
+  (`lambda_scale = "relative"`, default) or 1 (`"absolute"`); a zero denominator gives 1;
+- `s2s = lambda·T + (1 − lambda)·s2`, floored at `1e-8`.
 
-- Candidates are visited in mean-closeness order: the closest slot first, then the plain models'
-  left/right expansion.
-- A candidate is accepted iff `u` is finite and inside the band.
-- The walk stops at `k` accepted genes, after `BAND_MAX_SCAN_FACTOR · k` (= 20 k) examined slots,
-  when both sides are exhausted, or when the pool is full.
-- `k` is a **fixed** gene count; there is no adaptive growth and no `tau`.
-- A short pool is kept as is; the band is never relaxed. A gene with fewer than
-  `BAND_MIN_GENES` (= 10) accepted genes on either side, or fewer than 10 residuals, gets `p = −1`.
-- The target is normally its own closest neighbour and is in its own pool.
-- The same `u` (pooled variance) selects both the case and the control pool. That is an
-  equal-variance assumption in SELECTION only; the null keeps separate per-side pools.
+Reported: the three lambdas (as used), their unclipped ratios, the effective dimension
+`p_hat = Σ wVhat / max wVhat` (Bock's condition `p_hat > 2`), the participation ratio
+`(Σ wVhat)² / Σ (wVhat)²`, `s2s_pool` per gene and `n_floored`.
 
-**API.**
+### Cross-fitted scaling (`scaling = "xfit_js"` / `"xfit_raw"`)
+
+Each neighbour's CASE residuals are divided by the square root of its shrunk CONTROL variance and its
+CONTROL residuals by its CASE variance; the tested statistic is `β / sqrt(s2s_pool)`. The scale
+applied to a residual is then independent of that residual under H0, so the null is not internally
+studentised. `xfit_raw` uses the raw variances (lambda = 0). The scaling is applied once to the
+packed residuals, so every neighbourhood and `compute_pvalue` work unchanged.
+`observed_statistic_own` is returned **unscaled**. Assumption: equal group variances for a gene under
+H0 (for the scaling, not for the null's shape).
+
+`"same_group"` divides both pools by the neighbour's own pooled shrunk variance (internally
+studentised). It exists only as the benchmark's negative control.
+
+### Neighbourhoods
+
+- **Mean** (`k_start`, `k_step`, `k_max`, `tau`): the exact model's adaptive kNN. Under a scaling, the
+  `tau` rule acts on the scaled residuals.
+- **Band** (note A): the `k` nearest-in-mean genes whose `u` lies in `|u_j − u_g| ≤ tau_var`; visited
+  in mean-closeness order; stops at `k` accepted genes, after `20·k` examined slots, when both sides
+  are exhausted, or when the pool is full. A short pool is kept as is. Fewer than 10 accepted genes
+  or 10 residuals on either side gives `p = −1`. One `u` selects both pools.
+  - `match_variable = "raw"`: `u = l − S(m)`, `l = log(s2 + 1e-8)` on `log2(x + 1)` whatever
+    `norm_method` is, `S` a robust LOESS (`loess_robust`, span 0.3, degree 1);
+    `tau_var = c_tau · √ψ₁(d/2)` (0.80 / 0.53 / 0.34 × `c_tau` at n = 3 / 5 / 10 per group).
+  - `match_variable = "js"`: `u = log(s2s_pool / T)`, `tau_var = c_js · 1.4826 · MAD(u)`.
+- **Adaptive** (note F §5): candidates in mean-closeness order, in blocks of `block_size` slots; a
+  candidate farther than `r_max` in `|log2(m_j + 1) − log2(m_g + 1)|` stops the walk (radius); the
+  band decides acceptance. After each block: once `k_min` genes were accepted before it, a change of
+  the pool scale (mean |residual|) by more than `tau_stab` in either direction discards the block and
+  stops; then the stops met inside the block (`k` accepted or pool full, radius, scan cap `20·k`,
+  exhausted); then the acceptance rate over the last `w_blocks` blocks below `a_min` stops. Per-gene
+  outputs: genes accepted, slots scanned, final radius (largest log2 distance accepted), stop reason
+  (1 k, 2 radius, 3 stability, 4 acceptance rate, 5 scan cap, 6 exhausted). Short pools as the band.
+
+### API
 
 ```fortran
 subroutine compute_noise_pvalue_pipeline_variance( &
     replicates_case, n_genes_case, n_replicates_case, &
     replicates_control, n_genes_control, n_replicates_control, &
-    compute_pvalue_own, beta_centre, &
-    n_genes, norm_method, variance_mode, k, c_tau, &
-    loess_span, loess_degree, loess_robust, robust_var, max_pool_size, &
+    compute_pvalue_own, beta_centre, n_genes, norm_method, &
+    variance_mode, match_variable, scaling, shrink_target, lambda_scale, &
+    k_start, k_step, k_max, tau, k, c_tau, c_js, &
+    block_size, k_min, r_max, tau_stab, w_blocks, a_min, &
+    loess_span, loess_degree, loess_robust, shrink_loess_robust, max_pool_size, &
     pvalues_own, observed_statistic_own, log2fc, delta_hat, n_genes_with_pvalue, &
     neighborhood_size_own_case, neighborhood_size_own_control, &
     n_scanned_own_case, n_scanned_own_control, &
-    match_u, tau_var, d0, w, scatter, n_floored, ierr)
+    n_accepted_own_case, n_accepted_own_control, &
+    radius_own_case, radius_own_control, stop_own_case, stop_own_control, &
+    match_u, s2s_pool, tau_var, scatter, shrink_diag, n_floored, ierr, &
+    lambda_fixed, target_fixed)   ! optional, tests only (not in the C ABI)
 ```
 
-C entry: `compute_noise_pvalues_pipeline_variance_c`. Rcpp binding:
-`tox_compute_noise_pvalues_pipeline_variance_rcpp`. R wrapper:
-`tox_compute_noise_pvalues_pipeline_variance(case_replicates, control_replicates,
-variance_mode = c("band", "shrunk"), valid_genes_own = NULL, beta_centre = 0L, norm_method = 1L,
-k = 50L, c_tau = NULL, loess_span = 0.3, loess_degree = 1L, loess_robust = TRUE, robust_var = TRUE,
-max_pool_size)`. `c_tau = NULL` gives the notes' primary values: 1.5 for `"band"`, 1.0 for
-`"shrunk"`.
+C entry `compute_noise_pvalues_pipeline_variance_c`; Rcpp `tox_compute_noise_pvalues_pipeline_variance_rcpp`;
+R wrapper `tox_compute_noise_pvalues_pipeline_variance(case_replicates, control_replicates,
+variance_mode = c("mean", "band", "adaptive"), match_variable = c("raw", "js"),
+scaling = c("none", "xfit_raw", "xfit_js", "same_group"), shrink_target = c("median", "loess"),
+lambda_scale = c("relative", "absolute"), valid_genes_own = NULL, beta_centre = 0L, norm_method = 1L,
+k_start = 20L, k_step = 1L, k_max = 50L, tau = 0.1, k = 50L, c_tau = 1.5, c_js = 1.0,
+block_size = 5L, k_min = 20L, r_max = 0.5, tau_stab = 0.10, w_blocks = 2L, a_min = 0.2,
+loess_span = 0.3, loess_degree = 1L, loess_robust = TRUE, shrink_loess_robust = FALSE, max_pool_size)`.
+It returns the p-values, `obs_own`, `log2fc`, `delta_hat`, `n_success`, the pool, band and adaptive
+diagnostics, `match_u`, `s2s_pool`, `tau_var`, `scatter`, `lambda_pool` / `_case` / `_control` and their
+`*_unclipped` ratios, `p_hat`, `participation_ratio`, `n_floored`, `ierr`.
 
-The diagnostics are returned with the p-values:
+### Unit tests
 
-- `n_scanned_own_*`: candidate genes examined (−1 if not gathered);
-- `match_u`, `tau_var`;
-- `d0` (mode 2; `Inf` means no excess scatter; −1 in mode 1), `w`, `scatter`;
-- `n_floored`: genes at the variance floor.
+`test/mod_test_noise_model_variance.f90`, suite `noise_model_variance`, 13 tests:
 
-Unit tests: `test/mod_test_noise_model_variance.f90`, suite `noise_model_variance`, 6 tests.
-
-1. The polygamma helpers and the note-A τ values.
-2. A hand-built band gather: accepted genes and their order, scan count, `scan_max`, a short pool,
-   `max_pool_size`.
-3. Mode 1 with an all-accepting band reproduces the exact model at
-   `k_start = k_step = k_max = k` **exactly**.
-4. Mode 2 without noise heterogeneity gives `d0 = Inf`, `u = 0`, and the same exact reproduction.
-5. A band nothing passes drops every gene.
-6. Argument validation.
+1. Trigamma and note A's `τ` values.
+2. A hand-built band gather.
+3. Regression: band, raw, no scaling reproduces the module before note F bit-identically
+   (`test/test_files/variance_band_regression.txt`).
+4. Parities: mean mode = the exact model; an all-accepting band = the exact model at fixed `k`;
+   cross-fit and same-group scaling with lambda = 1 and a constant target = the exact model;
+   neutral adaptive settings = the band.
+5. Every adaptive stop reason, on a hand-built structure.
+6. `Vhat` unbiased (normal, skewed, t10; n = 3, 5, 10; unbalanced 3/5); the per-group estimator
+   `n/(n−1)³ Σ(w − w̄)²` equals `s2²/4` at n = 3.
+7. Lambda near 1 without heterogeneity, clearly below 1 with it; relative = absolute weights for a
+   constant target.
+8. Calibration regression (n = 3, log-variance scatter 1.05, null, fixed k = 300): cross-fit JS
+   `p ≤ 0.001` at most 2× nominal; same-group clearly above.
+9. Scale invariance (linear branch), the floor path, argument validation.

@@ -677,12 +677,13 @@ the same six TCGA base cohorts at n = 3 and 5.
 **Design.** Per round: 2n distinct samples drawn at random from the base cohort (first n to
 group A, next n to B; a cell with 2n > S is skipped and recorded, `skip = TRUE`), a fresh DE
 set and effects injected by binomial thinning exactly as in Part R (pi1 = 0.1, balanced, Δ = 0),
-or no injection at all (pi1 = 0, the null arm). 100 rounds per (cohort, n, pi1) cell
-(`POWER_ROUNDS_RS`) = 2400 datasets. Null and power rounds are different datasets with different
+or no injection at all (pi1 = 0, the null arm). n ∈ {3, 5, 7, 10} (7 and 10 since 28/10/2026,
+note E v2 §5: they decide from which n shrinkage is no longer needed). 100 rounds per (cohort, n,
+pi1) cell (`POWER_ROUNDS_RS`) = 4800 datasets. Null and power rounds are different datasets with different
 seeds (one running job counter across cohort, n, pi1 and round). The composition used for
 balancing is now estimated from 2n samples; `power_rs_checks.csv` reports the realised shift.
-Methods: limma, edgeR, DESeq2, `TOX-log|TPM-centred` (the Part R comparator), and the variance
-arms A c ∈ {1.5, 2, 3, 4} and B c ∈ {1, 2, 3, 4} on the same centred input. No input grid.
+Methods: limma, edgeR, DESeq2, `TOX-log|TPM-centred` (the Part R comparator), and the variance-aware
+arms of note F §7 on the same centred input (§10.3). No input grid.
 
 **Caveats for every RS statement.** The base cohort is fixed, so SEs reflect subsampling
 variability only. Results are reported **per base cohort** (6), SEs are never pooled across
@@ -699,28 +700,23 @@ Fortran visits candidates in exactly that order), its median and the share above
 by expression decile in `power_scan_radius.csv`. In rounds without DE genes every
 DE-dependent metric (TPR, AUC, AUPRC, precision at k, LFC metrics) is NA instead of 0.
 
-### 10.1 Decision protocol (pre-specified; confirmed by the project owner 21/10/2026)
+### 10.1 Decision protocol (note E v2 §6; PROPOSAL until the owner confirms)
 
-Fixed before any RS run; `power_report.R` evaluates it (`power_rs_gates.csv`, console
-"PART RS DECISION PROTOCOL"). "At least 5 of 6 cohorts" is applied as n_cohorts − 1. The
-comparator is `TOX-log|TPM-centred`.
+Evaluated by `power_report.R` (`power_rs_gates.csv`, console "PART RS DECISION PROTOCOL").
+"At least 5 of 6 cohorts" is applied as n_cohorts − 1; the comparator is `TOX-log|TPM-centred`.
 
-1. **Calibration first** (pi1 = 0, per cohort, n = 3 and 5). An arm passes in a cohort if its
-   `p_le05_null` ≤ comparator + 0.01; it passes at n if it passes in ≥ 5 of 6 cohorts.
-   `any_call_05`, `ks_null`, `p_le01_null`, `p_le10_null` are reported as supporting evidence,
-   not gated (`any_call_05` is harsh under the complete null).
-2. **Choose c on calibration only:** for each of A and B and each n, the smallest c in the
-   grid that passes step 1. None passes → "fails calibration at n", and that arm stops there.
-3. **Power at the chosen c** (pi1 = 0.1). Improvement over the comparator if AUPRC excess rises
-   by ≥ 0.02 in ≥ 5 of 6 cohorts, no cohort loses more than 0.01, and observed FDR at nominal
-   0.05 is ≤ comparator + 0.02 **in every cohort** (the note does not say how many cohorts this
-   condition needs; every cohort is the reading used). Reported alongside: TPR at nominal and at
-   achieved FDR, FDR, |LFC|80, and the AUPRC-excess gap to limma, edgeR and DESeq2.
-4. **Does shrinkage help?** B (its chosen c) beats A (its chosen c) if AUPRC excess is higher
-   by ≥ 0.02 in ≥ 5 of 6 cohorts and B's `p_le05_null` is not higher than A's by more than
-   0.01 (in every cohort, same reading as in step 3).
-5. **All arms that ran are reported**, failures included. Wording about shrinkage in the
-   documentation is decided only after step 4.
+1. **Gates per arm and n:** calibration (null arm `p_le05_null` ≤ comparator + 0.01), tail (null arm
+   `p ≤ 0.001` share ≤ 0.002 and `p ≤ 0.01` share ≤ 0.015), FDR (power arm observed FDR at nominal
+   0.05 ≤ 0.075), each in ≥ 5 of 6 cohorts.
+2. **Free parameters on the null arm only:** for the JS band (`c_js` ∈ {0.5, 1}) and the adaptive
+   growth (`r_max` ∈ {0.25, 0.5, 1}), the smallest value passing the calibration and tail gates.
+3. **Shrinkage helps at n** (`xfit-js` vs `xfit-raw`): the FDR gate passes with shrinkage and not
+   without, or AUPRC excess rises by ≥ 0.02 in ≥ 5 of 6 cohorts with no loss in calibration.
+4. **Not needed from n on:** the smallest n from which `xfit-raw` passes all three gates and
+   `xfit-js` does not reach the AUPRC gain, at every larger n tested.
+5. Every arm is reported, failures included.
+
+The note D protocol (21/10/2026) evaluated the c grid of the A/B arms, which note F replaced.
 
 **Results.** — (not run yet)
 
@@ -730,7 +726,56 @@ comparator is `TOX-log|TPM-centred`.
   sample of the base cohort, for every method of Parts R and RS (manifest: `zero_free`,
   `n_zero_dropped`). Hypothesis: exact zeros at high expression contaminate the pools.
 - **E2 cross-fitted selection:** not implemented (owner decision pending; only if RS fails the
-  calibration gate).
+  calibration gate). Note F's cross-fitting is in the SCALING, not the selection (§10.3).
+
+### 10.3 Variance-aware arms (note F §7, 28/10/2026)
+
+All on the comparator's input (`tpm_centred` in R and RS, TPM elsewhere), Parts RS, R, P+ and V
+unless stated; "mean" arms use the comparator's neighbourhood (k20_50, tau 0.1):
+
+| arm | neighbourhood | match | scaling |
+|---|---|---|---|
+| `TOX-log-vband-c3` | band, k = 50 | raw, c = 3 | none (the band as it was) |
+| `TOX-log-vband-js-c0.5`, `-c1` | band | James-Stein, `c_js` | none (replaces note B's vshrunk) |
+| `TOX-log-xfit-raw` | mean | – | cross-fit, raw variances (also Part U) |
+| `TOX-log-xfit-js` | mean | – | cross-fit, James-Stein, median target — PRIMARY (also Part U) |
+| `TOX-log-xfit-js-loess` | mean | – | same, LOESS target (also Part U) |
+| `TOX-log-xfit-js-nocf` | mean | – | same-group negative control (RS n = 3, 5 and P+ only) |
+| `TOX-log-adapt-r0.25`, `-r0.5`, `-r1` | adaptive, `r_max` | raw, c = 3 | none |
+| `TOX-log-adapt-xfit-js` | adaptive, `r_max` = 0.5 | James-Stein, `c_js` = 1 | cross-fit, James-Stein |
+
+Reported in addition: calibration and power by expression decile (`power_by_decile.csv`,
+`by_decile_*.png`), the lambdas, `p_hat` and participation ratio, adaptive stop-reason shares and
+radii, and arm pairs (`power_paired_arms.csv`: xfit-js − xfit-raw, LOESS − median, same-group −
+cross-fit, JS band − raw band, adaptive + xfit − xfit).
+
+**Known limit (unit test, 28/10/2026):** on simulated null data at n = 3 the cross-fitted null still
+has 3.3× too many `p ≤ 0.001` with the comparator's k20_50 neighbourhood, 1.7× at a fixed k = 300.
+The excess shrinks with the pool for every scaling (finite-pool tail), so read the tail gate with the
+pool size in mind (eval doc §23).
+
+### 10.4 Part U: unequal group variances (note E v2 §5)
+
+P+ at sigma_d = sigma_hat with every gene's case-group dispersion × rho², so the case extra-Poisson SD
+is rho × the control one; rho ∈ {1, 1.25, 1.5, 2}, nb and lnpois, n ∈ {3, 5, 10}, pi1 ∈ {0, 0.1},
+20 rounds. Arms: references, `TOX-log`, `xfit-raw`, `xfit-js`, `xfit-js-loess`. It tests the
+equal-variance assumption of the cross-fitted scaling, which Parts R and RS cannot (random halves of
+one cohort have rho = 1 by construction). Plot `unequal_variance_rho.png`.
+
+### 10.5 Note G: variance imbalance and false positives
+
+Per job with variance-aware arms, `power_test.R` writes `vdiag_<job>.csv.gz` (per gene `s2_A`,
+`s2_B`, `s2`, `m_A`, `m_B`, `m` on log2(TPM + 1); A = control, B = case as the sampler labels them).
+The report computes `L` (group imbalance relative to each group's own trend), `|L|` and `v`
+(overall relative noise) and, per round and method among true negatives: A1 Spearman correlations
+with p (`variance_diagnostic_corr.csv`; read against the P+ pi1 = 0 baseline; the signed version
+depends on which group is A), A2 FPR by decile and the top-5 % enrichment with a bootstrap CI over
+rounds (`variance_diagnostic_bins.csv`, `variance_diagnostic_enrichment.csv`), A3 the utility of an
+empirical and a null-calibrated imbalance flag (`variance_flag_utility.csv`), and the note G §6 flag
+decision (`variance_flag_decision.csv`; confirmed 28/10/2026: enrichment ≥ 2 with CI above 1 in ≥ 4 of
+6 cohorts AND a lower FDR at ≤ 0.02 TPR cost). A4, real contrasts (healthy vs Stage IV, no truth):
+`TCGA_test/scripts/variance_ratio_real_contrasts.R <out_dir> <healthy.rds> <stageiv.rds> ...`; its
+null threshold comes from random halves of the healthy cohort.
 
 ---
 

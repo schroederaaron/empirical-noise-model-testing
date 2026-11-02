@@ -1,5 +1,5 @@
 #!/bin/bash
-# power_full.sbatch -- FULL RUN: P+ and Part R (all six TCGA base cohorts), 20 rounds,
+# power_full.sbatch -- FULL RUN: P+, Part R (all six TCGA base cohorts), V and U, 20 rounds,
 # then power_report.R. Writes to the DEFAULT locations ($ROOT/power_raw, $ROOT/power_out).
 #
 # Submit from the directory that holds logs/ (the job itself cd-s into $WORK), AFTER the smoke test looked sane:
@@ -28,7 +28,7 @@ WORK=$ROOT/Tensor-Omics
 IMAGE=/media/BioNAS2/apptainer/images/arch-gfortran.sif
 S=analysis/TCGA_test/scripts
 CPUS=${SLURM_CPUS_PER_TASK:-32}
-PARTS="P+,R"                     # add more (e.g. "R,P,P+,Q,C,S,N,V,D") to regenerate other parts too
+PARTS="P+,R,V,U"                 # note F section 7 parts besides RS (power_rs.sbatch); add more to regenerate others
 
 COHORTS="coad_healthy coad_stageiv luad_healthy luad_stageiv kirc_healthy kirc_stageiv"
 REAL_RDS=""

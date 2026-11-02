@@ -197,3 +197,13 @@ test_that("data_hash: same dataset -> same hash, different round -> different ha
   expect_identical(mat_hash(a$counts), mat_hash(b$counts))
   expect_false(identical(mat_hash(a$counts), mat_hash(c$counts)))
 })
+
+test_that("Part U: rho scales the case dispersion by rho^2 for every gene", {
+  set.seed(41)
+  G <- 3000; tr <- make_truth_power(G, 0, 200)
+  sim <- simulate_power(tr, "nb", 200, disp_model = "const", rho = 2)
+  cA <- sim$counts[, 1:200]; cB <- sim$counts[, 201:400]
+  phi <- function(x) (apply(x, 1, var) - rowMeans(x)) / rowMeans(x)^2
+  hi <- rowMeans(cA) > 200
+  expect_equal(median(phi(cB)[hi] / phi(cA)[hi]), 4, tolerance = 0.1)
+})

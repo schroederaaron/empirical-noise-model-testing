@@ -46,22 +46,29 @@
 #   S   STRESS ONLY: `bimodal`. Not for ranking methods.
 #   N   Input scale x correction under nuisance (depth, dispersion model).
 #   V   Variance-only nulls (case-group dispersion x hv_factor).
+#   U   Unequal group variances (note E v2 section 5, note F section 7): P+ at
+#       sigma_d = sigma_hat with the case-group dispersion x rho^2 for EVERY gene
+#       (case extra-Poisson SD = rho x control), rho in {1, 1.25, 1.5, 2}; tests the
+#       equal-variance assumption of the cross-fitted scaling. Cross-fit arms only.
 #   D   DESeq2 diagnostic (I7): nb, null and power arms, DESeq2 default vs
 #       independentFiltering = TRUE vs cooksCutoff = FALSE. No TOX.
 #
 # RAW OUTPUT (PCFG$raw_dir/<part>/; not committed)
 #   results_<job>.csv.gz   one row per (method, gene): p, padj, lfc, log2fc, tie,
 #                          floor_th, nbhd_own_case, nbhd_own_control, lfc_scale; the
-#                          variance-band arms add vb_u, vb_scan_case/_control,
-#                          vb_genes_case/_control, vb_k, vb_tau, vb_d0, vb_w,
-#                          vb_scatter, vb_n_floored, vb_scan_radius (NA for every
-#                          other method)
+#                          variance-aware arms add vb_u, vb_scan_case/_control,
+#                          vb_genes_case/_control, vb_k, vb_tau, vb_scatter,
+#                          vb_n_floored, vb_scan_radius, vb_lambda_pool/_case/_control,
+#                          vb_p_hat, vb_participation_ratio, vb_stop_case/_control,
+#                          vb_radius_case (NA for every other method)
 #   truth_<job>.csv.gz     one row per gene: is_de, true_lfc, expr, kept, is_hv
 #                          (+ realised_lfc in Part R)
 #   diag_<job>.csv.gz      Part Q: pool diagnostics on a gene subset
+#   vdiag_<job>.csv.gz     parts with variance-aware arms: per gene s2_A, s2_B, s2,
+#                          m_A, m_B, m on log2(TPM + 1) (note G section 2)
 #   manifest.csv           one row per job: cell keys, round, seed, Delta, effect-draw
 #                          diagnostics, Part R cohort fields, variance-band scalars
-#                          (vb_*: tau, d0, w, ev, scatter, n_floored), dispersion
+#                          (vb_*: band width, lambdas, p_hat), dispersion
 #                          parameter file (disp_*), data_hash, elapsed_sec, raw_bytes,
 #                          skipped (cells with 2n > S), git commit
 #   pcfg_dump.txt          the full PCFG of the run
@@ -97,6 +104,7 @@ source(.find_file(c(file.path(COMMON_DIR, "..", "Simulated_data", "scripts", "ca
 source(file.path(COMMON_DIR, "tox_null_reimpl.R"))      # Part Q pool diagnostics
 source(file.path(COMMON_DIR, "power_constants.R"))      # POWER_LIB_SIZE
 source(file.path(COMMON_DIR, "print_utils.R"))          # print_tab (note C)
+source(file.path(COMMON_DIR, "variance_diagnostics.R")) # vdiag_frame (note G)
 load_or_install("parallel")
 
 #' gzip-compressed CSV via base R (data.table::fwrite compression needs a zlib-enabled build).
@@ -104,11 +112,11 @@ write_gz <- function(x, f) { con <- gzfile(f, "w"); on.exit(close(con)); write.c
 
 # ------------------------------------------------------------ configuration
 
-ALL_PARTS <- c("R", "RS", "P", "P+", "Q", "C", "S", "N", "V", "D")
+ALL_PARTS <- c("R", "RS", "P", "P+", "U", "Q", "C", "S", "N", "V", "D")
 REAL_PARTS <- c("R", "RS")                   # parts drawn from the real cohorts
 # The seed's part index. FROZEN in the order parts were added (RS last), so adding a
 # part never changes the datasets of the existing ones; ALL_PARTS only sets the order.
-SEED_PARTS <- c("R", "P", "P+", "Q", "C", "S", "N", "V", "D", "RS")
+SEED_PARTS <- c("R", "P", "P+", "Q", "C", "S", "N", "V", "D", "RS", "U")
 .env_parts <- Sys.getenv("POWER_PARTS", paste(ALL_PARTS, collapse = ","))
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
@@ -157,13 +165,15 @@ PCFG <- list(
            zero_free = Sys.getenv("POWER_R_ZERO_FREE", "0") == "1"),
   # Part RS (note D WP3): n per group, rounds per cell (own setting; the global
   # n_rounds stays the default of every other part), TOX comparator = Part R's.
-  RS = list(n_reps = c(3L, 5L), pi1 = c(0, 0.10),
+  RS = list(n_reps = c(3L, 5L, 7L, 10L), pi1 = c(0, 0.10),     # n = 7, 10: note E v2 section 5
             n_rounds = as.integer(Sys.getenv("POWER_ROUNDS_RS", "100")),
             tox_arms = list(list(label = "TOX-log|TPM-centred", engine = "exact", norm = 1L, null = 0L,
                                  input = "tpm", centre = TRUE))),
   P = list(dists = c("nb", "lnpois", "tpois"), n_reps = c(3L, 5L, 10L), pi1 = 0.10),
   `P+` = list(dists = c("nb", "lnpois"), n_reps = c(3L, 5L, 10L), pi1 = c(0, 0.10),
-              disp_model = "hetero", sigma_mult = c(0, 0.5, 1, 2)),
+              disp_model = "hetero", sigma_mult = c(0, 0.5, 1)),     # sigma_d 0 / 0.53 / 1.05 (note F)
+  U = list(dists = c("nb", "lnpois"), n_reps = c(3L, 5L, 10L), pi1 = c(0, 0.10),
+           disp_model = "hetero", sigma_mult = 1, rho = c(1, 1.25, 1.5, 2)),
   Q = list(dists = "lnpois", n_reps = 5L,
            pi1 = c(0.01, 0.05, 0.10, 0.30), het = c(1, 0.5)),
   C = list(dists = c("nb", "lnpois"), n_reps = c(3L, 5L, 10L), pi1 = 0.10,
@@ -229,39 +239,43 @@ PCFG <- list(
   # computed over a different gene set in the oracle calls).
   oracle_arms = c("TOX-log", "TOX-log-blocked"),
 
-  # Variance-matched neighbourhood (implementation notes A "vband" / B "vshrunk";
-  # tox_compute_noise_pvalues_pipeline_variance, eval doc §21). Exact null, fixed k,
-  # neighbours restricted to a two-sided band on the detrended (A) or shrunk (B)
-  # log-variance. Run ONLY in `parts`: P+ (dispersion scatter), V (hypervariable
-  # genes -- the notes say "Part D", but D is the DESeq2 diagnostic and runs no TOX;
-  # fpr_hv05 lives in V), R and RS. In Parts R and RS they take the comparator's input,
-  # `TOX-log|TPM-centred` (centre = TRUE); elsewhere the comparator is `TOX-log` (TPM).
-  # c_tau is chosen on CALIBRATION only (note A section 7, note D section 6); the c
-  # variants are the sensitivity grid, A {1, 1.5, 2, 3, 4}, B {0.5, 1, 2, 3, 4}.
-  # `parts` on an arm restricts it further: c3 / c4 (note D WP5) are not run in V,
-  # and RS runs A c1.5-c4 and B c1-c4 only.
-  vmatch = list(k = 50L, span = 0.3, degree = 1L, parts = c("P+", "V", "R", "RS")),
-  vmatch_arms = list(
-    list(label = "TOX-log-vband",        engine = "variance", norm = 1L, null = 0L, input = "tpm", match = "A", c_tau = 1.5),
-    list(label = "TOX-log-vband-c1",     engine = "variance", norm = 1L, null = 0L, input = "tpm", match = "A", c_tau = 1.0,
-         parts = c("P+", "V", "R")),
-    list(label = "TOX-log-vband-c2",     engine = "variance", norm = 1L, null = 0L, input = "tpm", match = "A", c_tau = 2.0),
-    list(label = "TOX-log-vband-c3",     engine = "variance", norm = 1L, null = 0L, input = "tpm", match = "A", c_tau = 3.0,
-         parts = c("P+", "R", "RS")),
-    list(label = "TOX-log-vband-c4",     engine = "variance", norm = 1L, null = 0L, input = "tpm", match = "A", c_tau = 4.0,
-         parts = c("P+", "R", "RS")),
-    list(label = "TOX-log-vshrunk",      engine = "variance", norm = 1L, null = 0L, input = "tpm", match = "B", c_tau = 1.0),
-    list(label = "TOX-log-vshrunk-c0.5", engine = "variance", norm = 1L, null = 0L, input = "tpm", match = "B", c_tau = 0.5,
-         parts = c("P+", "V", "R")),
-    list(label = "TOX-log-vshrunk-c2",   engine = "variance", norm = 1L, null = 0L, input = "tpm", match = "B", c_tau = 2.0),
-    list(label = "TOX-log-vshrunk-c3",   engine = "variance", norm = 1L, null = 0L, input = "tpm", match = "B", c_tau = 3.0,
-         parts = c("P+", "R", "RS")),
-    list(label = "TOX-log-vshrunk-c4",   engine = "variance", norm = 1L, null = 0L, input = "tpm", match = "B", c_tau = 4.0,
-         parts = c("P+", "R", "RS")),
-    # note B section 5.3: do hypervariable genes drive d0? Part R only.
-    list(label = "TOX-log-vshrunk-classicalvar", engine = "variance", norm = 1L, null = 0L, input = "tpm",
-         match = "B", c_tau = 1.0, robust_var = FALSE, parts = "R")
-  ),
+  # Variance-aware arms (implementation notes A and F; tox_compute_noise_pvalues_pipeline_variance,
+  # eval doc §21/§22). Note F section 7, first round:
+  #   (a) TOX-log-vband-c3       the band as it is now (raw match, c = 3)
+  #       TOX-log-vband-js-c*    band on the James-Stein-shrunk variance (replaces note B's vshrunk)
+  #   (b) TOX-log-xfit-raw       cross-fitted scaling, raw variances (lambda = 0)
+  #   (c) TOX-log-xfit-js        cross-fitted scaling, James-Stein, median target   PRIMARY
+  #       TOX-log-xfit-js-loess  same, LOESS target
+  #       TOX-log-xfit-js-nocf   negative control: same-group scaling (RS n = 3, 5 and P+ only)
+  #       TOX-log-adapt-r*       adaptive variance-aware growth (raw match, c = 3)
+  #       TOX-log-adapt-xfit-js  adaptive growth (JS match, c_js = 1) + cross-fit JS
+  # "mean" arms use the comparator's neighbourhood (kcfg, tau). In Parts R and RS
+  # every arm takes the comparator's input, `TOX-log|TPM-centred` (centre = TRUE);
+  # elsewhere the comparator is `TOX-log` (TPM). Free parameters (c_js, r_max) are
+  # chosen on the pi1 = 0 rounds only (power_report.R, note E v2 section 6).
+  # `parts` restricts an arm; `rs_n` restricts it to these n in Part RS.
+  vmatch = list(k = 50L, span = 0.3, degree = 1L, parts = c("P+", "V", "R", "RS", "U")),
+  adapt  = list(block_size = 5L, k_min = 20L, tau_stab = 0.10, w_blocks = 2L, a_min = 0.2),
+  vmatch_arms = local({
+    four <- c("P+", "V", "R", "RS")
+    v <- function(label, ...) c(list(label = label, engine = "variance", norm = 1L, null = 0L, input = "tpm"),
+                                list(...))
+    list(
+      v("TOX-log-vband-c3",      vmode = "band", match = "raw", scaling = "none", c_tau = 3, parts = four),
+      v("TOX-log-vband-js-c0.5", vmode = "band", match = "js",  scaling = "none", c_js = 0.5, parts = four),
+      v("TOX-log-vband-js-c1",   vmode = "band", match = "js",  scaling = "none", c_js = 1.0, parts = four),
+      v("TOX-log-xfit-raw",      vmode = "mean", scaling = "xfit_raw"),
+      v("TOX-log-xfit-js",       vmode = "mean", scaling = "xfit_js", target = "median"),
+      v("TOX-log-xfit-js-loess", vmode = "mean", scaling = "xfit_js", target = "loess"),
+      v("TOX-log-xfit-js-nocf",  vmode = "mean", scaling = "same_group", target = "median",
+        parts = c("RS", "P+"), rs_n = c(3L, 5L)),
+      v("TOX-log-adapt-r0.25",   vmode = "adaptive", match = "raw", scaling = "none", c_tau = 3, r_max = 0.25, parts = four),
+      v("TOX-log-adapt-r0.5",    vmode = "adaptive", match = "raw", scaling = "none", c_tau = 3, r_max = 0.5,  parts = four),
+      v("TOX-log-adapt-r1",      vmode = "adaptive", match = "raw", scaling = "none", c_tau = 3, r_max = 1.0,  parts = four),
+      v("TOX-log-adapt-xfit-js", vmode = "adaptive", match = "js",  scaling = "xfit_js", c_js = 1.0, r_max = 0.5,
+        parts = four)
+    )
+  }),
   # Part Q pool diagnostics (exact engine, pooled, log): genes per job, and genes
   # the R re-implementation is checked on against the Fortran first.
   diag = list(n_genes = 200L, n_check = 200L),
@@ -389,9 +403,11 @@ disp_hetero <- function(mu, sigma_d, prm = PCFG$disp_hetero)
 #'             lognormal scatter), "gene" (log phi_g ~ N(log disp, disp_gene_sd)),
 #'             "hetero" (P+: disp_hetero at sigma_d).
 #' hv:         logical over genes; those get phi * hv_factor in group B only.
+#' rho:        Part U: every gene's group-B (case) dispersion x rho^2, so the case
+#'             extra-Poisson SD is rho x the control one.
 #' The defaults draw NO extra random numbers.
 simulate_power <- function(truth, dist, n_rep, lib_size = PCFG$lib_size, disp = PCFG$disp,
-                           depth = "equal", disp_model = "const", hv = NULL, sigma_d = 0) {
+                           depth = "equal", disp_model = "const", hv = NULL, sigma_d = 0, rho = 1) {
   G <- length(truth$pi_a)
   L <- sample(round(exp(rnorm(3e4, log(2000), 0.8))), G, replace = TRUE)
   lib <- switch(depth,
@@ -411,6 +427,7 @@ simulate_power <- function(truth, dist, n_rep, lib_size = PCFG$lib_size, disp = 
     hetero = disp_hetero(rowMeans(lamA), sigma_d),
     stop("unknown disp_model: ", disp_model))
   phiB <- if (is.null(hv)) phi else { p2 <- rep_len(phi, G); p2[hv] <- p2[hv] * PCFG$hv_factor; p2 }
+  phiB <- phiB * rho^2
 
   # draw_counts takes a scalar or a per-gene vector (it recycles down the columns;
   # unit-tested in TCGA_test/tests/test_power_sim.R).
@@ -600,13 +617,17 @@ run_tox_arm <- function(mat, group, arm, tie, test_only = NULL) {
   centre <- as.integer(isTRUE(arm$centre) || identical(arm$input, "tpm_centred"))
 
   if (arm$engine == "variance") {
+    ad <- PCFG$adapt
     res <- tox_compute_noise_pvalues_pipeline_variance(
              case_replicates = case_rep, control_replicates = ctrl_rep,
-             variance_mode = if (arm$match == "A") "band" else "shrunk",
+             variance_mode = arm$vmode, match_variable = arm$match %||% "raw",
+             scaling = arm$scaling %||% "none", shrink_target = arm$target %||% "median",
              valid_genes_own = valid, beta_centre = centre, norm_method = arm$norm,
-             k = PCFG$vmatch$k, c_tau = arm$c_tau,
-             loess_span = PCFG$vmatch$span, loess_degree = PCFG$vmatch$degree,
-             robust_var = arm$robust_var %||% TRUE, max_pool_size = PCFG$max_pool)
+             k_start = PCFG$kcfg$k_start, k_step = PCFG$kcfg$k_step, k_max = PCFG$kcfg$k_max, tau = PCFG$tau,
+             k = PCFG$vmatch$k, c_tau = arm$c_tau %||% 3, c_js = arm$c_js %||% 1,
+             block_size = ad$block_size, k_min = ad$k_min, r_max = arm$r_max %||% 0.5,
+             tau_stab = ad$tau_stab, w_blocks = ad$w_blocks, a_min = ad$a_min,
+             loess_span = PCFG$vmatch$span, loess_degree = PCFG$vmatch$degree, max_pool_size = PCFG$max_pool)
   } else {
     fn <- if (arm$engine == "exact") tox_compute_noise_pvalues_pipeline_exact
           else tox_compute_noise_pvalues_pipeline
@@ -641,10 +662,13 @@ run_tox_arm <- function(mat, group, arm, tie, test_only = NULL) {
     out$vb_genes_control <- na_neg(nt) / nrow(ctrl_rep)
     out$vb_k   <- PCFG$vmatch$k
     out$vb_tau <- res$tau_var
-    out$vb_d0  <- res$d0
-    out$vb_w   <- res$w
     out$vb_scatter   <- res$scatter
     out$vb_n_floored <- res$n_floored
+    for (nm in c("lambda_pool", "lambda_case", "lambda_control", "p_hat", "participation_ratio"))
+      out[[paste0("vb_", nm)]] <- res[[nm]]
+    out$vb_stop_case    <- na_neg(res$stop_own_case)
+    out$vb_stop_control <- na_neg(res$stop_own_control)
+    out$vb_radius_case  <- na_neg(res$radius_own_case)
   }
   out
 }
@@ -785,7 +809,9 @@ run_methods_power <- function(sim, part) {
     # Short arm list (note D WP3): Part R's comparator only, no input grid.
     for (a in PCFG$RS$tox_arms) safe(a$label, run_tox_arm(tpm, grp, a, tie))
   } else if (RUN_TOX && part != "D") {
-    arms <- if (part == "C") PCFG$tox_input_arms else PCFG$tox_arms
+    arms <- if (part == "C") PCFG$tox_input_arms
+            else if (part == "U") Filter(function(a) a$label == "TOX-log", PCFG$tox_arms)
+            else PCFG$tox_arms
     tmm <- if (any(vapply(arms, function(a) a$input == "tmm", logical(1)))) tmm_cpm(counts)
     for (a in arms) {
       mat <- if (a$input == "tmm") tmm else tpm
@@ -793,10 +819,17 @@ run_methods_power <- function(sim, part) {
     }
   }
 
-  # Variance-matched arms (notes A/B). Parts R, RS: the comparator's input, TPM-centred.
-  if (RUN_TOX && part %in% PCFG$vmatch$parts)
-    for (a in PCFG$vmatch_arms) if (is.null(a$parts) || part %in% a$parts)
+  # Variance-aware arms (notes A, F). Parts R, RS: the comparator's input, TPM-centred.
+  vdiag <- NULL
+  if (RUN_TOX && part %in% PCFG$vmatch$parts) {
+    n_rep <- sum(grp == "B")
+    for (a in PCFG$vmatch_arms) {
+      if (!is.null(a$parts) && !part %in% a$parts) next
+      if (part == "RS" && !is.null(a$rs_n) && !n_rep %in% a$rs_n) next
       safe(a$label, run_tox_arm(tpm, grp, modifyList(a, list(centre = part %in% REAL_PARTS)), tie))
+    }
+    vdiag <- vdiag_frame(tpm, grp, "TPM")             # note G: method-independent
+  }
 
   if (part == "Q" && RUN_TOX) {
     is_null <- !sim$is_de[keep]
@@ -807,7 +840,7 @@ run_methods_power <- function(sim, part) {
     diag <- tryCatch(run_diag_q(tpm, grp, sim$is_de[keep]), error = function(e) {
       message("    pool diagnostics failed: ", conditionMessage(e)); NULL })
   }
-  list(results = out, keep = keep, diag = diag, data_hash = mat_hash(counts))
+  list(results = out, keep = keep, diag = diag, vdiag = vdiag, data_hash = mat_hash(counts))
 }
 
 # =============================================================================
@@ -826,13 +859,13 @@ build_jobs <- function() {
     for (d in g$dists %||% "real") for (n in g$n_reps) for (pi1 in g$pi1)
       for (h in g$het %||% 1) for (fu in g$frac_up %||% PCFG$frac_up)
         for (dp in g$depth %||% "equal") for (dm in g$disp_model %||% "const")
-          for (hvf in g$hv_frac %||% 0) for (sm in g$sigma_mult %||% 0)
+          for (hvf in g$hv_frac %||% 0) for (sm in g$sigma_mult %||% 0) for (rh in g$rho %||% 1)
             for (dt in g$delta_target %||% NA_real_)
               for (i in if (skip) 1L else seq_len(g$n_rounds %||% PCFG$n_rounds))
                 jb[[length(jb) + 1L]] <<- data.frame(
                   part = part, dist = d, n_rep = n, pi1 = pi1, het = h, frac_up = fu,
                   depth = dp, disp_model = dm, hv_frac = hvf,
-                  sigma_mult = sm, sigma_d = sm * PCFG$disp_hetero$sigma_hat,
+                  sigma_mult = sm, sigma_d = sm * PCFG$disp_hetero$sigma_hat, rho = rh,
                   delta_target = dt, cohort = cohort, round = i, skip = skip)
   }
   for (pt in setdiff(ALL_PARTS, REAL_PARTS)) if (pt %in% PCFG$parts) add(pt, PCFG[[pt]])
@@ -881,7 +914,7 @@ run_job <- function(job) {
       seq_along(tr$is_de) %in% nul[sample.int(length(nul), round(job$hv_frac * length(nul)))]
     }
     c(simulate_power(tr, job$dist, job$n_rep, depth = job$depth,
-                     disp_model = job$disp_model, hv = hv, sigma_d = job$sigma_d),
+                     disp_model = job$disp_model, hv = hv, sigma_d = job$sigma_d, rho = job$rho),
       tr[c("eff_lfc_median_abs", "frac_sign_flip", "frac_below_floor")])
   }
 
@@ -895,24 +928,25 @@ run_job <- function(job) {
   if (length(rr$results))
     write_gz(bind_methods(rr$results), f("results"))
   if (!is.null(rr$diag)) write_gz(rr$diag, f("diag"))
-  raw_bytes <- sum(file.size(Filter(file.exists, f(c("truth", "results", "diag")))))
+  if (!is.null(rr$vdiag)) write_gz(rr$vdiag, f("vdiag"))
+  raw_bytes <- sum(file.size(Filter(file.exists, f(c("truth", "results", "diag", "vdiag")))))
 
   num <- function(x) if (is.null(x)) NA_real_ else x
-  # Variance-band scalars of the PRIMARY arms (notes A/B manifest additions). d0, w
-  # and the scatter do not depend on c_tau, so the primary arm stands for its family.
+  # Scalars of the reference variance arms (note F): the band width of the band as
+  # it is now, and the James-Stein shrinkage of the primary cross-fit arm (the
+  # lambdas depend on the data and the target only, not on the arm).
   vb <- function(lab, col) { r <- rr$results[[lab]]
     if (is.null(r) || is.null(r[[col]])) NA_real_ else r[[col]][1] }
-  vm_arm <- function(lab) Find(function(a) a$label == lab, PCFG$vmatch_arms) %||% list(c_tau = NA_real_)
-  d_df <- 2 * job$n_rep - 2
   real <- job$part %in% REAL_PARTS; co <- if (real) REAL_COHORTS[[job$cohort]]
   cbind(job,
-        vb_c_tau_A = vm_arm("TOX-log-vband")$c_tau, vb_tau_A = vb("TOX-log-vband", "vb_tau"),
-        vb_n_floored = vb("TOX-log-vband", "vb_n_floored"),
-        vb_c_tau_B = vm_arm("TOX-log-vshrunk")$c_tau, vb_tau_B = vb("TOX-log-vshrunk", "vb_tau"),
-        vb_d0 = vb("TOX-log-vshrunk", "vb_d0"), vb_w = vb("TOX-log-vshrunk", "vb_w"),
-        vb_scatter_robust = vb("TOX-log-vshrunk", "vb_scatter"),
-        vb_ev = vb("TOX-log-vshrunk", "vb_scatter") - trigamma(d_df / 2),
-        vb_d0_classicalvar = vb("TOX-log-vshrunk-classicalvar", "vb_d0"),
+        vb_tau_band_c3 = vb("TOX-log-vband-c3", "vb_tau"),
+        vb_lambda_pool = vb("TOX-log-xfit-js", "vb_lambda_pool"),
+        vb_lambda_case = vb("TOX-log-xfit-js", "vb_lambda_case"),
+        vb_lambda_control = vb("TOX-log-xfit-js", "vb_lambda_control"),
+        vb_lambda_pool_loess = vb("TOX-log-xfit-js-loess", "vb_lambda_pool"),
+        vb_p_hat = vb("TOX-log-xfit-js", "vb_p_hat"),
+        vb_participation_ratio = vb("TOX-log-xfit-js", "vb_participation_ratio"),
+        vb_n_floored = vb("TOX-log-xfit-js", "vb_n_floored"),
         vb_span = PCFG$vmatch$span, vb_k = PCFG$vmatch$k,
         delta = num(sim$delta), delta_realised = num(sim$delta_realised),
         n_de_total = sum(sim$is_de), n_kept = sum(rr$keep), n_methods = length(rr$results),

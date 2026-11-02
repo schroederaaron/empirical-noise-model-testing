@@ -12,7 +12,7 @@
 # -----------------------------------------------------------------------------
 
 PRINT_KEYS <- c("part", "dist", "n_rep", "pi1", "het", "frac_up", "depth", "disp_model", "hv_frac",
-                "sigma_d", "delta_target", "cohort", "method")
+                "sigma_d", "rho", "delta_target", "cohort", "method")
 
 #' Columns with a single distinct non-NA value, and their values as "name=value".
 .const_cols <- function(x, keep = "method") {

@@ -2,7 +2,8 @@
 
 **For:** Claude Code. **Prerequisite:** note A is implemented (Fortran `match_mode = 1`, `match_logvar`, `tau_var`, `n_scanned_*`, `tox_match_logvar()` for model "A",
 arm plumbing, report columns). This note adds ONLY: the shrunk matching variable (R side), its tau rule, one arm family, tests, and checks. **No further Fortran changes.**
-**Status:** written without executing any R. Reference prototype: `toy_variance_moderation.py` (`fit_eb`, `moderate`) and `toy_variance_neighbourhood.py` (row "band two-sided, shrunk (EB)").
+**Status:** written without executing any R.
+**Update 27/10/2026:** implemented as `variance_mode = 2`. A distribution-free successor (moment-based shrinkage towards the LOESS trend, without the trigamma `d0`) and a studentised-null switch are proposed in `implementation_note_E_moment_shrinkage.md`. Reference prototype: `toy_variance_moderation.py` (`fit_eb`, `moderate`) and `toy_variance_neighbourhood.py` (row "band two-sided, shrunk (EB)").
 
 ---
 
