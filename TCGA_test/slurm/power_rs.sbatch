@@ -8,7 +8,7 @@
 #
 # SMOKE TEST first (note D section 4 step 2): 2 rounds, two cohorts (one healthy, one
 # Stage IV), separate raw/out folders, runtime and storage extrapolated to the full
-# 4800 datasets (6 cohorts x n 3, 5, 7, 10 x pi1 0, 0.1 x 100 rounds) on 32 cores (printed at the end of power_test.R):
+# 2400 datasets (6 cohorts x n 3, 5, 7, 10 x pi1 0, 0.1 x 50 rounds) on 32 cores (printed at the end of power_test.R):
 #   sbatch --export=ALL,POWER_ROUNDS_RS=2,RS_COHORTS="kirc_healthy kirc_stageiv",RS_TAG=_rs_smoke power_rs.sbatch
 # FULL RUN only after the smoke run looked sane and its estimates were checked:
 #   sbatch power_rs.sbatch
@@ -38,7 +38,7 @@ WORK=$ROOT/Tensor-Omics
 IMAGE=/media/BioNAS2/apptainer/images/arch-gfortran.sif
 S=analysis/TCGA_test/scripts
 CPUS=${SLURM_CPUS_PER_TASK:-32}
-ROUNDS=${POWER_ROUNDS_RS:-100}
+ROUNDS=${POWER_ROUNDS_RS:-50}
 TAG=${RS_TAG:-}                  # "" = default power_raw / power_out
 COHORTS=${RS_COHORTS:-"coad_healthy coad_stageiv luad_healthy luad_stageiv kirc_healthy kirc_stageiv"}
 
@@ -70,7 +70,7 @@ apptainer exec --cleanenv --home "$WORK/.container-home" -B /media/BioNAS2 \
   --env POWER_PARTS=RS \
   --env POWER_ROUNDS_RS="$ROUNDS" \
   --env POWER_CORES="$CPUS" \
-  --env POWER_EXTRAP_JOBS=4800 \
+  --env POWER_EXTRAP_JOBS=2400 \
   --env POWER_EXTRAP_CORES=32 \
   --env POWER_REAL_RDS="$REAL_RDS" \
   --env POWER_RAW_DIR="$ROOT/power_raw$TAG" \

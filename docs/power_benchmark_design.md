@@ -678,8 +678,8 @@ the same six TCGA base cohorts at n = 3 and 5.
 group A, next n to B; a cell with 2n > S is skipped and recorded, `skip = TRUE`), a fresh DE
 set and effects injected by binomial thinning exactly as in Part R (pi1 = 0.1, balanced, Δ = 0),
 or no injection at all (pi1 = 0, the null arm). n ∈ {3, 5, 7, 10} (7 and 10 since 28/10/2026,
-note E v2 §5: they decide from which n shrinkage is no longer needed). 100 rounds per (cohort, n,
-pi1) cell (`POWER_ROUNDS_RS`) = 4800 datasets. Null and power rounds are different datasets with different
+note E v2 §5: they decide from which n shrinkage is no longer needed). 50 rounds per (cohort, n,
+pi1) cell (`POWER_ROUNDS_RS`; 100 until 02/11/2026) = 2400 datasets. Null and power rounds are different datasets with different
 seeds (one running job counter across cohort, n, pi1 and round). The composition used for
 balancing is now estimated from 2n samples; `power_rs_checks.csv` reports the realised shift.
 Methods: limma, edgeR, DESeq2, `TOX-log|TPM-centred` (the Part R comparator), and the variance-aware

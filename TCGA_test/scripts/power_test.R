@@ -32,7 +32,7 @@
 #       realised vs intended log2 FC per injected gene.
 #   RS  REAL DATA AT SMALL n (note D WP3): the Part R cohorts, but each round draws
 #       2n samples at random (n = 3, 5 per group; disjoint groups), null arm (pi1 = 0,
-#       calibration) and power arm (pi1 = 0.1), 100 rounds (POWER_ROUNDS_RS). Short
+#       calibration) and power arm (pi1 = 0.1), 50 rounds (POWER_ROUNDS_RS). Short
 #       arm list: limma / edgeR / DESeq2, TOX-log|TPM-centred and the variance arms.
 #   P   Main simulated grid: nb / lnpois / tpois x n_rep, balanced effect draw (I3).
 #   P+  Dispersion heterogeneity (I2): phi_g = phi_trend(mu_g) exp(sigma_d z - sigma_d^2/2),
@@ -166,7 +166,7 @@ PCFG <- list(
   # Part RS (note D WP3): n per group, rounds per cell (own setting; the global
   # n_rounds stays the default of every other part), TOX comparator = Part R's.
   RS = list(n_reps = c(3L, 5L, 7L, 10L), pi1 = c(0, 0.10),     # n = 7, 10: note E v2 section 5
-            n_rounds = as.integer(Sys.getenv("POWER_ROUNDS_RS", "100")),
+            n_rounds = as.integer(Sys.getenv("POWER_ROUNDS_RS", "50")),
             tox_arms = list(list(label = "TOX-log|TPM-centred", engine = "exact", norm = 1L, null = 0L,
                                  input = "tpm", centre = TRUE))),
   P = list(dists = c("nb", "lnpois", "tpois"), n_reps = c(3L, 5L, 10L), pi1 = 0.10),
