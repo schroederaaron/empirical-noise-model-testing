@@ -616,16 +616,20 @@ run_tox_arm <- function(mat, group, arm, tie, test_only = NULL) {
   if (!is.null(test_only)) valid[-test_only] <- 0L
   centre <- as.integer(isTRUE(arm$centre) || identical(arm$input, "tpm_centred"))
 
+  # Per-arm neighbourhood overrides (knn_config_test.R): arm$kcfg (k_start, k_step,
+  # k_max), arm$tau, arm$k (band / adaptive / ellipse size), arm$adapt (adaptive settings).
+  kc <- modifyList(PCFG$kcfg, arm$kcfg %||% list())
+  tau <- arm$tau %||% PCFG$tau
   if (arm$engine == "variance") {
-    ad <- PCFG$adapt
+    ad <- modifyList(PCFG$adapt, arm$adapt %||% list())
     res <- tox_compute_noise_pvalues_pipeline_variance(
              case_replicates = case_rep, control_replicates = ctrl_rep,
              variance_mode = arm$vmode, match_variable = arm$match %||% "raw",
              scaling = arm$scaling %||% "none", shrink_target = arm$target %||% "median",
              valid_genes_own = valid, beta_centre = centre, norm_method = arm$norm,
-             k_start = PCFG$kcfg$k_start, k_step = PCFG$kcfg$k_step, k_max = PCFG$kcfg$k_max, tau = PCFG$tau,
-             k = PCFG$vmatch$k, c_tau = arm$c_tau %||% 3, c_js = arm$c_js %||% 1,
-             block_size = ad$block_size, k_min = ad$k_min, r_max = arm$r_max %||% 0.5,
+             k_start = kc$k_start, k_step = kc$k_step, k_max = kc$k_max, tau = tau,
+             k = arm[["k"]] %||% PCFG$vmatch$k, c_tau = arm$c_tau %||% 3, c_js = arm$c_js %||% 1,
+             block_size = ad$block_size, k_min = min(ad$k_min, arm[["k"]] %||% PCFG$vmatch$k), r_max = arm$r_max %||% 0.5,
              tau_stab = ad$tau_stab, w_blocks = ad$w_blocks, a_min = ad$a_min,
              loess_span = PCFG$vmatch$span, loess_degree = PCFG$vmatch$degree, max_pool_size = PCFG$max_pool)
   } else {
@@ -634,8 +638,8 @@ run_tox_arm <- function(mat, group, arm, tie, test_only = NULL) {
     res <- fn(case_replicates = case_rep, control_replicates = ctrl_rep,
               valid_genes_own = valid, beta_centre = centre,
               norm_method = arm$norm,
-              k_start = PCFG$kcfg$k_start, k_step = PCFG$kcfg$k_step, k_max = PCFG$kcfg$k_max,
-              tau = PCFG$tau, null_method = arm$null, max_pool_size = PCFG$max_pool)
+              k_start = kc$k_start, k_step = kc$k_step, k_max = kc$k_max,
+              tau = tau, null_method = arm$null, max_pool_size = PCFG$max_pool)
   }
   if (!is.null(res$ierr) && res$ierr != 0L) stop(sprintf("TOX ierr = %d", res$ierr))
 
@@ -660,7 +664,7 @@ run_tox_arm <- function(mat, group, arm, tie, test_only = NULL) {
     out$vb_scan_control <- na_neg(res$n_scanned_own_control)
     out$vb_genes_case    <- na_neg(nc) / nrow(case_rep)     # pool size in GENES
     out$vb_genes_control <- na_neg(nt) / nrow(ctrl_rep)
-    out$vb_k   <- PCFG$vmatch$k
+    out$vb_k   <- arm[["k"]] %||% PCFG$vmatch$k
     out$vb_tau <- res$tau_var
     out$vb_scatter   <- res$scatter
     out$vb_n_floored <- res$n_floored
@@ -1034,11 +1038,13 @@ cost_report <- function(man) {
 }
 
 # =============================================================================
-if (sys.nframe() == 0L) {
+#' The whole run: load cohorts, build and run the jobs, write the manifests. A
+#' function so knn_config_test.R can call it with its own PCFG.
+power_main <- function() {
   if (any(REAL_PARTS %in% PCFG$parts)) {
     rds <- trimws(strsplit(PCFG$R$input_rds, ",")[[1]])
     if (!length(rds)) message("Parts R / RS skipped: set POWER_REAL_RDS (comma-separated cohort RDS files).")
-    for (p in rds) { co <- load_real_cohort(p); REAL_COHORTS[[co$label]] <- co }
+    for (p in rds) { co <- load_real_cohort(p); REAL_COHORTS[[co$label]] <<- co }
   }
   jobs <- build_jobs()
   if (is.null(jobs) || !nrow(jobs)) stop("No jobs -- check POWER_PARTS / POWER_REAL_RDS.")
@@ -1073,3 +1079,5 @@ if (sys.nframe() == 0L) {
   message(sprintf("\n%d / %d jobs written to %s/. Next: Rscript power_report.R",
                   sum(!man$skip), sum(!jobs$skip), PCFG$raw_dir))
 }
+
+if (sys.nframe() == 0L) power_main()

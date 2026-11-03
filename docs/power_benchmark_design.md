@@ -779,6 +779,37 @@ null threshold comes from random halves of the healthy cohort.
 
 ---
 
+## 11. Neighbourhood configuration test (`knn_config_test.R`, 03/11/2026)
+
+**Question.** Which neighbourhood construction, at which size, does what, on real and simulated
+data? Motivation: the n = 3 tail excess of the empirical null shrinks with pool size (eval doc §23),
+and TCGA's noise and outliers may make n = 3 look worse than it is elsewhere.
+
+**Grid** (each without scaling and with cross-fitted JS scaling, 52 arms):
+- `mean` (the exact model's kNN): k20–50 / tau 0.1 (the comparator), k20–100, k20–200,
+  k50–200 / tau 0.25, k50–200 without the tau stop, fixed k = 100, 200, 400;
+- `band` (raw match): k ∈ {50, 100, 200} × c ∈ {3, 5};
+- `adaptive` (raw match, c = 3): k ∈ {50, 100, 200} × r_max ∈ {0.5, 1};
+- `ellipse` (raw match, c = 3; the k nearest in joint log2-mean / variance distance):
+  k ∈ {50, 100, 200} × r_max ∈ {0.5, 1}.
+
+**Data.** Part RS (six TCGA base cohorts, 2n samples per round) and Part P+ (simulated, sigma_d 0 and
+1.05, nb and lnpois); n ∈ {3, 5, 10}; null (pi1 = 0) and power (pi1 = 0.1) arms; 20 rounds; plus
+limma / edgeR / DESeq2 and the comparators. Own folders (`knn_raw`, `knn_out`); the full
+`power_report.R` runs on them.
+
+**Read-out.** `knn_summary.csv`: per arm, part, n (and sigma_d), the null tail (`p <= 0.001` as a
+fold over nominal, `p <= 0.01`, `p <= 0.05`), FDR and TPR at nominal 0.05, TPR at achieved FDR,
+AUPRC excess, pool size, p-value floor, short-pool share, and the number of cohorts passing the
+E v2 tail and FDR gates. `knn_tradeoff_*.png` (tail vs TPR, one point per configuration) and
+`knn_by_size_*.png` (FDR and tail against k). Choose on the null arm (tail gate), then compare power.
+
+Run: `sbatch knn_config.sbatch` (subsets via `KNN_FAMILIES`, `KNN_PARTS`, `KNN_N`, `KNN_ROUNDS`).
+
+**Results.** — (not run yet)
+
+---
+
 ## Sources
 
 - Soneson & Robinson, iCOBRA: open, reproducible, standardized and live method benchmarking, *Nat Methods* 2016 — https://www.nature.com/articles/nmeth.3805; `plot_fdrtprcurve` — https://rdrr.io/bioc/iCOBRA/man/plot_fdrtprcurve.html

@@ -28,7 +28,7 @@ WORK=$ROOT/Tensor-Omics
 IMAGE=/media/BioNAS2/apptainer/images/arch-gfortran.sif
 S=analysis/TCGA_test/scripts
 CPUS=${SLURM_CPUS_PER_TASK:-32}
-PARTS="P+,R,V,U"                 # note F section 7 parts besides RS (power_rs.sbatch); add more to regenerate others
+PARTS="P,P+,R,RS,V,U,Q,C,S,N,D"                 # note F section 7 parts besides RS (power_rs.sbatch); add more to regenerate others
 
 COHORTS="coad_healthy coad_stageiv luad_healthy luad_stageiv kirc_healthy kirc_stageiv"
 REAL_RDS=""

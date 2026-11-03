@@ -959,7 +959,7 @@ report <- function(S, PV, OG, PD, BK, RC, PT, BA, RSC, GT, M, VG = NULL) {
     print_tab(VG$enrich_summary, "A2 FPR enrichment (p <= 0.01) of the top 5 % vs the rest, bootstrap CI over rounds",
               csv = "variance_diagnostic_enrichment.csv", keys = c(PRINT_KEYS, "split"))
     print_tab(VG$flag_rule, "G section 6: implement an imbalance flag? (null-calibrated flag, per part, n and method)",
-              csv = "variance_flag_utility.csv", keys = c("part", "n_rep", "method"),
+              csv = "variance_flag_utility.csv", keys = c("part", "n_rep", "pi1", "method"),
               notes = sprintf("flag if enrichment >= %g with CI above 1 in >= %d%% of cohorts AND removing flagged genes lowers FDR, TPR cost <= %g",
                               RCFG$flag_rule$enrichment, round(100 * RCFG$flag_rule$cohort_share), RCFG$flag_rule$tpr_cost))
   }
@@ -1007,14 +1007,15 @@ vdiag_summary <- function(VCr, VBr, VEr, VFr) {
   fr <- RCFG$flag_rule
   rule <- if (!is.null(enrich)) {
     e <- enrich[enrich$split == "absL_nullcal" & enrich$alpha == fr$alpha, ]
-    if (nrow(e)) do.call(rbind, lapply(split(e, list(e$part, e$n_rep, e$method), drop = TRUE), function(d) {
+    # one row per cohort: the null (pi1 = 0) and power (pi1 > 0) arms are judged separately
+    if (nrow(e)) do.call(rbind, lapply(split(e, list(e$part, e$n_rep, e$pi1, e$method), drop = TRUE), function(d) {
       ok <- d$enrichment >= fr$enrichment & d$ci_lo > 1
       need <- ceiling(fr$cohort_share * nrow(d))
       f <- if (!is.null(flag)) flag[flag$part == d$part[1] & flag$n_rep == d$n_rep[1] & flag$method == d$method[1] &
                                     flag$flag == "null_calibrated", ]
       useful <- !is.null(f) && nrow(f) > 0 && mean(f$d_fdr_mean, na.rm = TRUE) < 0 &&
                 mean(f$d_tpr_mean, na.rm = TRUE) >= -fr$tpr_cost
-      data.frame(part = d$part[1], n_rep = d$n_rep[1], method = d$method[1], n_cohorts = nrow(d),
+      data.frame(part = d$part[1], n_rep = d$n_rep[1], pi1 = d$pi1[1], method = d$method[1], n_cohorts = nrow(d),
                  n_enriched = sum(ok), need = need, flag_useful = useful, implement_flag = sum(ok) >= need && useful)
     }))
   }

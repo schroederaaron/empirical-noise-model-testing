@@ -282,7 +282,7 @@ else is `noise_model_exact`'s, reused rather than copied: Bessel-corrected resid
 
 | switch | values | meaning |
 |---|---|---|
-| `variance_mode` (which genes enter the pools) | 0 `"mean"`, 1 `"band"`, 3 `"adaptive"` | mean-matched kNN of the exact model; note A's fixed-`k` variance band; note F's adaptive growth |
+| `variance_mode` (which genes enter the pools) | 0 `"mean"`, 1 `"band"`, 3 `"adaptive"`, 4 `"ellipse"` | mean-matched kNN of the exact model; note A's fixed-`k` variance band; note F's adaptive growth; the `k` nearest in a joint (log2 mean, variance) distance |
 | `match_variable` (the band's `u`) | 0 `"raw"`, 1 `"js"` | raw detrended log2-variance (note A); James-Stein-shrunk variance |
 | `scaling` (null construction) | 0 `"none"`, 1 `"xfit_raw"`, 2 `"xfit_js"`, 3 `"same_group"` | as the exact model; cross-fitted with raw / shrunk variances; benchmark-only negative control |
 
@@ -342,6 +342,12 @@ studentised). It exists only as the benchmark's negative control.
   exhausted); then the acceptance rate over the last `w_blocks` blocks below `a_min` stops. Per-gene
   outputs: genes accepted, slots scanned, final radius (largest log2 distance accepted), stop reason
   (1 k, 2 radius, 3 stability, 4 acceptance rate, 5 scan cap, 6 exhausted). Short pools as the band.
+- **Ellipse** (note F §5's 2-D alternative): the `k` genes with the smallest
+  `D = sqrt((dm / r_max)² + (du / tau_var)²)`, `dm = |log2(m_j + 1) − log2(m_g + 1)|` on this side's
+  means and `du = |u_j − u_g|` (the band's `u` and `tau_var`, raw or JS), among the genes inside the
+  ellipse `D ≤ 1`. Exact: the walk goes outward in log2 mean and stops once `dm / r_max` exceeds the
+  `k`-th best `D` (stop 1) or 1 (nothing left inside; stop 2, a short pool if fewer than `k`), at the
+  scan cap `20·k` (5) or when exhausted (6). Pooled in increasing `D`; short pools as the band.
 
 ### API
 
@@ -365,7 +371,7 @@ subroutine compute_noise_pvalue_pipeline_variance( &
 
 C entry `compute_noise_pvalues_pipeline_variance_c`; Rcpp `tox_compute_noise_pvalues_pipeline_variance_rcpp`;
 R wrapper `tox_compute_noise_pvalues_pipeline_variance(case_replicates, control_replicates,
-variance_mode = c("mean", "band", "adaptive"), match_variable = c("raw", "js"),
+variance_mode = c("mean", "band", "adaptive", "ellipse"), match_variable = c("raw", "js"),
 scaling = c("none", "xfit_raw", "xfit_js", "same_group"), shrink_target = c("median", "loess"),
 lambda_scale = c("relative", "absolute"), valid_genes_own = NULL, beta_centre = 0L, norm_method = 1L,
 k_start = 20L, k_step = 1L, k_max = 50L, tau = 0.1, k = 50L, c_tau = 1.5, c_js = 1.0,
@@ -377,7 +383,7 @@ diagnostics, `match_u`, `s2s_pool`, `tau_var`, `scatter`, `lambda_pool` / `_case
 
 ### Unit tests
 
-`test/mod_test_noise_model_variance.f90`, suite `noise_model_variance`, 13 tests:
+`test/mod_test_noise_model_variance.f90`, suite `noise_model_variance`, 15 tests:
 
 1. Trigamma and note A's `τ` values.
 2. A hand-built band gather.
@@ -394,3 +400,5 @@ diagnostics, `match_u`, `s2s_pool`, `tau_var`, `scatter`, `lambda_pool` / `_case
 8. Calibration regression (n = 3, log-variance scatter 1.05, null, fixed k = 300): cross-fit JS
    `p ≤ 0.001` at most 2× nominal; same-group clearly above.
 9. Scale invariance (linear branch), the floor path, argument validation.
+10. Ellipse: the pool equals a brute-force search for the `k` nearest inside the ellipse (40 targets,
+    3 shapes, k = 10 and 50); its stop reasons; pipeline runs with raw and JS matching.
