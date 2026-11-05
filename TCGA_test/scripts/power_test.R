@@ -254,7 +254,10 @@ PCFG <- list(
   # elsewhere the comparator is `TOX-log` (TPM). Free parameters (c_js, r_max) are
   # chosen on the pi1 = 0 rounds only (power_report.R, note E v2 section 6).
   # `parts` restricts an arm; `rs_n` restricts it to these n in Part RS.
-  vmatch = list(k = 50L, span = 0.3, degree = 1L, parts = c("P+", "V", "R", "RS", "U")),
+  vmatch = list(k = 50L, span = 0.3, degree = 1L, parts = c("P+", "V", "R", "RS", "U"),
+                # Part R only: these variance arms ALSO run on every input of the grid, as
+                # "<label>|<input>" (counts, TMM, MoR, ...), next to the plain TOX arms.
+                grid_arms = "TOX-log-xfit-js"),
   adapt  = list(block_size = 5L, k_min = 20L, tau_stab = 0.10, w_blocks = 2L, a_min = 0.2),
   vmatch_arms = local({
     four <- c("P+", "V", "R", "RS")
@@ -808,6 +811,11 @@ run_methods_power <- function(sim, part) {
         mat <- mats[[inp$src]]; if (is.null(mat)) next
         ai <- modifyList(a, list(input = inp$src, centre = inp$centre))
         safe(paste0(a$label, "|", inp$name), run_tox_arm(mat, grp, ai, tie))
+      }
+    if (part == "R") for (a in PCFG$vmatch_arms) if (a$label %in% PCFG$vmatch$grid_arms)
+      for (inp in PCFG$inputs) {
+        mat <- mats[[inp$src]]; if (is.null(mat)) next
+        safe(paste0(a$label, "|", inp$name), run_tox_arm(mat, grp, modifyList(a, list(centre = inp$centre)), tie))
       }
   } else if (RUN_TOX && part == "RS") {
     # Short arm list (note D WP3): Part R's comparator only, no input grid.

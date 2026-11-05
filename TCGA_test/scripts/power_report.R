@@ -95,7 +95,7 @@ RCFG <- list(
   plot_methods_C = c("limma", "edgeR", "DESeq2", "TOX-log-TPM",
                      "TOX-log-TPM-centred", "TOX-log-TMM"),
   grid_inputs = c("TPM", "TPM-centred", "counts", "counts-centred", "TMM", "MoR"),
-  grid_arms   = c("TOX-log", "TOX-log-blocked", "TOX-raw", "TOX-raw-blocked"),
+  grid_arms   = c("TOX-log", "TOX-log-blocked", "TOX-raw", "TOX-raw-blocked", "TOX-log-xfit-js"),
   # Variance-aware arms (implementation notes A, F; power_test.R PCFG$vmatch_arms) and,
   # per part, the plain TOX arm they are compared with (same input; Parts R and RS
   # run them on TPM-centred).
@@ -640,6 +640,7 @@ make_plots <- function(M, CU, PR, ST, PT = NULL, BA = NULL) {
   vm_size <- list(`P+` = c(12, 15), V = c(10, 7), R = c(12, 8), RS = c(16, 7))
   for (pt in intersect(names(vm_fac), unique(CU$part))) {
     all_m <- unique(CU$method[CU$part == pt])
+    all_m <- all_m[!grepl("xfit.*\\|", all_m)]   # variance arms on the input grid: plot (8) shows them
     if (!any(all_m %in% RCFG$vmatch_methods)) next
     for (set in c("vs_ref", "all")) {
       st <- vm_style(if (set == "vs_ref") intersect(all_m, c(REF_METHODS, RCFG$vmatch_methods)) else all_m)

@@ -597,6 +597,11 @@ stated so it can fail):
 | P5 | on real thinned data, edgeR's power advantage over TOX shrinks or reverses relative to the synthetic arms — mirroring its calibration reversal between `nb` and TCGA | the claim that synthetic benchmarks flatter parametric tools |
 | P6 | pAUC@0.05 and AUPRC separate the methods by more than full AUC does (which spans < 0.03 today); `auprc_range` is in the spread table | that the AUC's flatness is an imbalance artefact rather than genuine equivalence |
 
+**Part R input grid (05/11/2026).** Besides the plain TOX arms, the variance arms in
+`PCFG$vmatch$grid_arms` (currently `TOX-log-xfit-js`) run on every grid input (TPM,
+TPM-centred, counts, counts-centred, TMM, MoR) as `<arm>|<input>`; they appear in the
+`grid_R_*.png` plots next to the plain arms.
+
 **Headline claims come from Part R** (real cohorts). Parts P / P+ / Q / C are mechanism and
 supporting evidence; Part S (`bimodal`) is a stress case only. **Known open observation, not
 investigated:** on `bimodal`, limma's power *falls* with n (0.453 / 0.328 / 0.295 at
