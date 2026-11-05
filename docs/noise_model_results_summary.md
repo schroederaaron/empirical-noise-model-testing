@@ -1,3 +1,7 @@
+> **Current results (variance-aware model, power benchmark, TCGA + yeast): see
+> [benchmark_results.md](benchmark_results.md).** This file holds the earlier mock-null
+> calibration results (up to 09/2026).
+
 # Noise model evaluation
 As of 23/08/2026
 
