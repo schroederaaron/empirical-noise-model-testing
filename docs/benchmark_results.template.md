@@ -226,8 +226,14 @@ TCGA 5 of 6, yeast 1 of 2.
 - **Variance arm on the input grid** (`TOX-log-xfit-js|counts`, `|TMM`, `|MoR`, …): implemented
   05/11/2026, not run yet.
 - **n = 3 on TCGA Stage IV:** FDR around 0.25 even with cross-fitting. Cause not established.
-- **TCGA n = 3, xfit-js:** null p ≤ 0.01 is nominal (0.0100), but FDR@0.05 in the power rounds
-  is 0.167. The pi1 = 0 and pi1 = 0.1 rounds disagree, and why is not explained yet.
+- **TCGA n = 3, xfit-js (resolved 09/11/2026, approximately):** null p ≤ 0.01 is nominal
+  (0.0100), yet FDR@0.05 is 0.167. These two numbers do not contradict each other. At n = 3 on
+  TCGA, BH at 0.05 makes about 240 calls out of 13 900 genes, so the BH threshold sits at
+  p ≈ 0.0009, where the null rate is 3.5× nominal (p ≤ 0.001: 0.0035). The resulting estimate is
+  12 500 null genes × about 0.003 ≈ 39 false calls out of 243, i.e. FDR ≈ 0.16. The same
+  estimate gives about 0.10 for yeast (observed 0.096) and about 0.06 for edgeR on TCGA (0.054).
+  FDR is set by the null tail *at the BH threshold*. On TCGA, low power puts that threshold deep
+  in the tail. The cause of the tail excess itself is still open.
 - **Yeast WT vs Δsnf2:** TOX is less calibrated on WT in both RS and R, while the references
   are not. A replicate-heterogeneity check on WT is open.
 - **Unequal group variances (rho = 2):** cross-fitting assumes equal variances under H0 and
