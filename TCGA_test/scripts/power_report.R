@@ -82,6 +82,8 @@ source(file.path(COMMON_DIR, "variance_diagnostics.R"))
 options(width = 250, max.print = 1e6)          # note C R1 (also set in config.R)
 suppressPackageStartupMessages({ library(ggplot2); library(parallel) })
 rd <- function(f) read.csv(f, stringsAsFactors = FALSE)      # .csv.gz decompressed by base R
+PLOT_TH <- theme_bw(base_size = 9) + theme(legend.position = "bottom", panel.grid.minor = element_blank())
+save_plot <- function(name, p, w = 10, h = 9) ggsave(file.path(RCFG$out_dir, name), p, width = w, height = h, dpi = 150)
 
 .base <- if (exists("TOX_TEST_DIR")) dirname(TOX_TEST_DIR) else "."
 RCFG <- list(
@@ -95,13 +97,18 @@ RCFG <- list(
   plot_methods_C = c("limma", "edgeR", "DESeq2", "TOX-log-TPM",
                      "TOX-log-TPM-centred", "TOX-log-TMM"),
   grid_inputs = c("TPM", "TPM-centred", "counts", "counts-centred", "TMM", "MoR"),
-  grid_arms   = c("TOX-log", "TOX-log-blocked", "TOX-raw", "TOX-raw-blocked", "TOX-log-xfit-js"),
+  grid_arms   = c("TOX-log", "TOX-log-blocked", "TOX-raw", "TOX-raw-blocked", "TOX-log-xfit-js", "TOX-log-xfit-js-boot"),
+  # Variance arms whose own input is TPM-centred: their plain label is that grid point.
+  vgrid_arms  = c("TOX-log-xfit-js", "TOX-log-xfit-js-boot"),
+  # Per-gene classes (FP / FN lists, |v| tests, spread plot): these methods, Parts R / RS.
+  gene_methods = "^(limma|edgeR|DESeq2|TOX-log\\|TPM-centred|TOX-log-xfit-js(-boot)?(\\|.*)?)$",
   # Variance-aware arms (implementation notes A, F; power_test.R PCFG$vmatch_arms) and,
   # per part, the plain TOX arm they are compared with (same input; Parts R and RS
   # run them on TPM-centred).
   vmatch_methods = c("TOX-log-vband-c3", "TOX-log-vband-js-c0.5", "TOX-log-vband-js-c1",
                      "TOX-log-xfit-raw", "TOX-log-xfit-js", "TOX-log-xfit-js-loess", "TOX-log-xfit-js-nocf",
-                     "TOX-log-adapt-r0.25", "TOX-log-adapt-r0.5", "TOX-log-adapt-r1", "TOX-log-adapt-xfit-js"),
+                     "TOX-log-adapt-r0.25", "TOX-log-adapt-r0.5", "TOX-log-adapt-r1", "TOX-log-adapt-xfit-js",
+                     "TOX-log-xfit-js-boot"),
   vmatch_comparator = c(`P+` = "TOX-log", V = "TOX-log", U = "TOX-log",
                         R = "TOX-log|TPM-centred", RS = "TOX-log|TPM-centred"),
   # Paired per-round comparisons between variance arms (arm minus ref).
@@ -109,7 +116,8 @@ RCFG <- list(
                c(arm = "TOX-log-xfit-js-loess", ref = "TOX-log-xfit-js",  label = "target: loess - median"),
                c(arm = "TOX-log-xfit-js-nocf",  ref = "TOX-log-xfit-js",  label = "same-group - cross-fit"),
                c(arm = "TOX-log-vband-js-c1",   ref = "TOX-log-vband-c3", label = "band: js c1 - raw c3"),
-               c(arm = "TOX-log-adapt-xfit-js", ref = "TOX-log-xfit-js",  label = "adaptive + xfit - xfit")),
+               c(arm = "TOX-log-adapt-xfit-js", ref = "TOX-log-xfit-js",  label = "adaptive + xfit - xfit"),
+               c(arm = "TOX-log-xfit-js-boot",  ref = "TOX-log-xfit-js",  label = "bootstrap - exact null")),
   # Free parameters, chosen on the pi1 = 0 rounds only: the smallest value whose arm
   # passes the calibration and tail gates (note F section 7).
   param_grid = list(`vband-js` = c(`TOX-log-vband-js-c0.5` = 0.5, `TOX-log-vband-js-c1` = 1),
@@ -179,7 +187,7 @@ job_metrics <- function(job) {
   meta <- job[, setdiff(names(job), c("git_commit", "cohort_file")), drop = FALSE]
   n_de_total <- sum(tr$is_de)
   out <- list(metrics = list(), curve = list(), pr = list(), strata = list(), radius = list(),
-              decile = list(), vcorr = list(), vbins = list(), venrich = list(), vflag = list())
+              decile = list(), vcorr = list(), vbins = list(), venrich = list(), vflag = list(), genes = list())
   # Note G: the method-independent variance file, when the job wrote one.
   vf <- file.path(d, sprintf("vdiag_%s.csv.gz", job$job_id))
   vq <- if (file.exists(vf)) { v <- rd(vf); vdiag_quantities(v[match(tk$gene, v$gene), ]) }
@@ -202,6 +210,8 @@ job_metrics <- function(job) {
       g <- vdiag_round(vq, r, tk$is_de, thr)
       out$vcorr[[m]] <- add(g$corr); out$vbins[[m]] <- add(g$bins)
       out$venrich[[m]] <- add(g$enrich); out$vflag[[m]] <- add(g$flag)
+      if (job$part %in% c("R", "RS") && grepl(RCFG$gene_methods, m))
+        out$genes[[m]] <- add(gene_classes(vq, r, tk$is_de, tk$expr))
     }
   }
   lapply(out, function(x) do.call(rbind, x))
@@ -377,8 +387,7 @@ zd_note <- function(M, part) {
 
 make_plots <- function(M, CU, PR, ST, PT = NULL, BA = NULL) {
   dir <- RCFG$out_dir
-  th <- theme_bw(base_size = 9) + theme(legend.position = "bottom", panel.grid.minor = element_blank())
-  save <- function(name, p, w = 10, h = 9) ggsave(file.path(dir, name), p, width = w, height = h, dpi = 150)
+  th <- PLOT_TH; save <- save_plot
   sfx <- function(pt) if (pt == "S") "_S_stress" else ""
   ttl <- function(pt, x) if (pt %in% names(PART_LABEL)) paste0(PART_LABEL[[pt]], "\n", x) else x
 
@@ -530,11 +539,14 @@ make_plots <- function(M, CU, PR, ST, PT = NULL, BA = NULL) {
   refs <- REF_METHODS
   mets <- c(fdr_nom_05 = "observed FDR @ nominal 0.05", tpr_nom_05 = "TPR @ nominal 0.05",
             tpr_ach05 = "TPR @ achieved FDR 0.05")
-  for (pt in intersect(c("N", "R"), unique(M$part))) {
-    g <- mean_se(M[M$part == pt, ], c(CELL, "method"), names(mets))
+  for (pt in intersect(c("N", "R", "RS"), unique(M$part))) {
+    g <- mean_se(M[M$part == pt & !M$pi1 %in% 0, ], c(CELL, "method"), names(mets))
     g$arm   <- sub("\\|.*$", "", g$method)
-    g$input <- ifelse(grepl("\\|", g$method), sub("^.*\\|", "", g$method), NA)
-    panels <- if (pt == "N") split(g, g$n_rep) else list(all = g)
+    g$input <- ifelse(grepl("\\|", g$method), sub("^.*\\|", "", g$method),
+                      ifelse(g$method %in% RCFG$vgrid_arms & !paste0(g$method, "|TPM-centred") %in% g$method,
+                             "TPM-centred", NA))
+    if (pt == "RS" && !any(grepl("\\|", setdiff(g$method, "TOX-log|TPM-centred")))) next   # no RS grid run
+    panels <- if (pt %in% c("N", "RS")) split(g, g$n_rep) else list(all = g)
     for (nm in names(panels)) for (mt in names(mets)) {
       gg <- panels[[nm]]
       gi <- gg[!is.na(gg$input), ]; gr <- gg[gg$method %in% refs, ]
@@ -550,12 +562,12 @@ make_plots <- function(M, CU, PR, ST, PT = NULL, BA = NULL) {
         geom_line(linewidth = 0.6) + geom_point(size = 1.8) +
         scale_colour_manual(values = arm_cols) + fac +
         labs(title = sprintf("Part %s%s: %s by input", pt,
-                             if (pt == "N") paste0(", n_rep = ", nm) else " (whole cohorts, random halves)",
+                             if (pt == "R") " (whole cohorts, random halves)" else paste0(", n_rep = ", nm),
                              mets[[mt]]),
              subtitle = "Grey lines = reference tools on raw counts. Centred inputs are log arms only.",
              x = NULL, y = mets[[mt]], linetype = NULL) +
         th + theme(axis.text.x = element_text(angle = 35, hjust = 1))
-      save(if (pt == "N") sprintf("grid_N_%s_n%s.png", mt, nm) else sprintf("grid_R_%s.png", mt), p,
+      save(if (pt == "R") sprintf("grid_R_%s.png", mt) else sprintf("grid_%s_%s_n%s.png", pt, mt, nm), p,
            w = 11, h = if (pt == "N") 9 else 7)
     }
   }
@@ -749,8 +761,7 @@ make_plots <- function(M, CU, PR, ST, PT = NULL, BA = NULL) {
 #' correlations. DC, VC, VB: the aggregated decile, correlation and bin tables.
 make_plots_fg <- function(M, DC, VC, VB) {
   dir <- RCFG$out_dir
-  th <- theme_bw(base_size = 9) + theme(legend.position = "bottom", panel.grid.minor = element_blank())
-  save <- function(name, p, w = 10, h = 9) ggsave(file.path(dir, name), p, width = w, height = h, dpi = 150)
+  th <- PLOT_TH; save <- save_plot
   show_m <- function(m) m[m %in% c(REF_METHODS, RCFG$vmatch_comparator, "TOX-log-vband-c3", "TOX-log-xfit-raw",
                                    "TOX-log-xfit-js", "TOX-log-xfit-js-loess", "TOX-log-adapt-r0.5")]
 
@@ -809,9 +820,9 @@ make_plots_fg <- function(M, DC, VC, VB) {
     p <- ggplot(a, aes(decile, fpr_01_mean, colour = quantity)) +
       geom_hline(yintercept = 0.01, colour = "grey55") +
       geom_line(linewidth = 0.5) + geom_point(size = 1.2) +
-      scale_colour_manual(values = PALETTE[1:3]) +
+      scale_colour_manual(values = PALETTE[1:4]) +
       facet_grid(method ~ n_rep, labeller = labeller(n_rep = label_both)) +
-      labs(title = sprintf("Part %s: share of true negatives with p <= 0.01 by decile of |L|, L and v (note G A2)", pt),
+      labs(title = sprintf("Part %s: share of true negatives with p <= 0.01 by decile of |L|, L, v and |v| (note G A2)", pt),
            subtitle = "L: group variance imbalance; v: overall relative noise. Line = 0.01. Mean over cohorts and rounds.",
            x = "decile (1 = lowest)", y = "FPR at p <= 0.01", colour = NULL) +
       th + theme(strip.text.y = element_text(angle = 0, size = 6))
@@ -821,15 +832,15 @@ make_plots_fg <- function(M, DC, VC, VB) {
   if (!is.null(VC) && nrow(VC)) {
     d <- VC[VC$part %in% c("RS", "R") & VC$method %in% show_m(unique(VC$method)), ]
     if (nrow(d)) {
-      lg <- do.call(rbind, lapply(c("rho_signed", "rho_abs", "rho_overall"), function(q)
+      lg <- do.call(rbind, lapply(c("rho_signed", "rho_abs", "rho_overall", "rho_absv", "rho_absv_de"), function(q)
         data.frame(d[c("part", "cohort", "n_rep", "pi1", "method")], quantity = q,
                    v = d[[paste0(q, "_mean")]], se = d[[paste0(q, "_se")]])))
       lg$cell <- paste0(lg$part, " n=", lg$n_rep, " pi1=", lg$pi1)
       p <- ggplot(lg, aes(method, v, colour = quantity)) +
         geom_hline(yintercept = 0, colour = "grey55") +
         geom_pointrange(aes(ymin = v - se, ymax = v + se), position = position_dodge(0.6), size = 0.2) +
-        scale_colour_manual(values = PALETTE[1:3]) + facet_grid(cell ~ cohort) +
-        labs(title = "Note G A1: Spearman correlation of |L|, L, v with the p-value among true negatives",
+        scale_colour_manual(values = PALETTE[1:5]) + facet_grid(cell ~ cohort) +
+        labs(title = "Note G A1: Spearman correlation of |L|, L, v, |v| with the p-value (true negatives; rho_absv_de: DE genes)",
              subtitle = "Mean +/- SE over rounds. Negative = larger value goes with smaller p (more false positives). Read against the P+ pi1 = 0 baseline (variance_diagnostic_corr.csv).",
              x = NULL, y = "Spearman rho", colour = NULL) +
         th + theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 6), strip.text.y = element_text(angle = 0))
@@ -874,7 +885,7 @@ report_part <- function(S, pt) {
   x <- S[S$part == pt, ]
   meth <- vm_style(unique(x$method))$methods
   lab <- if (pt %in% names(PART_LABEL)) paste0(" -- ", PART_LABEL[[pt]]) else ""
-  power <- c("tpr_nom_05", "fdr_nom_05", "fdr_nom_10", "tpr_ach05", "auprc_excess_pe",
+  power <- c("tpr_nom_05", "fdr_nom_05", "fdr_nom_10", "tpr_ach05", "f1_05", "auprc_excess_pe",
              if (pt == "V") c("fpr_hv05", "fpr_nonhv05"))
   null  <- c("p_le05_null", "p_le01_null", "p_le001_null", "any_call_05", "ks_null")
   has0 <- any(x$pi1 == 0)
@@ -897,6 +908,7 @@ report <- function(S, PV, OG, PD, BK, RC, PT, BA, RSC, GT, M, VG = NULL) {
       "  tpr_nom_05 / fdr_nom_05  what a user gets at nominal 0.05; fdr zero-filled.\n",
       "  any_call_05  P(at least one BH call); under pi1 = 0 it is P(any false call) = the FDR.\n",
       "  auprc_excess_pe  AUPRC minus prevalence: comparable across pi1.\n",
+      "  f1_05  F1 = 2 TP / (2 TP + FP + FN) of the BH calls at 0.05.\n",
       "  ks_null  Kolmogorov-Smirnov distance of the null p-values to U(0, 1).\n", sep = "")
 
   bad <- M[!M$gene_set_ok %in% TRUE & "gene_set_ok" %in% names(M), c("part", "job_id", "method")]
@@ -991,9 +1003,9 @@ vd_thresholds <- function(run) {
 #' section 6 flag decision.
 vdiag_summary <- function(VCr, VBr, VEr, VFr) {
   if (is.null(VCr)) return(NULL)
-  corr <- mean_se(VCr, c(CELL, "method"), c("rho_signed", "rho_abs", "rho_overall"))
+  corr <- mean_se(VCr, c(CELL, "method"), c("rho_signed", "rho_abs", "rho_overall", "rho_absv", "rho_absv_de"))
   bins <- if (!is.null(VBr)) mean_se(VBr, c(CELL, "method", "quantity", "decile"),
-                                     c("fpr_001", "fpr_01", "fpr_05", "false_share_05"))
+                                     c("fpr_001", "fpr_01", "fpr_05", "false_share_05", "tpr_05"))
   enrich <- if (!is.null(VEr)) {
     k <- do.call(paste, c(VEr[c(CELL, "method", "split", "alpha")], sep = "\r"))
     set.seed(1L)
@@ -1025,6 +1037,72 @@ vdiag_summary <- function(VCr, VBr, VEr, VFr) {
 }
 
 # =============================================================================
+#' Per-gene diagnostics (FP / FN lists, |v| by class, expression spread). GC: the
+#' gene_classes() rows of every job; VB: the aggregated note-G bins (for |v|).
+#' Writes gene_classes.csv (every FP and FN, plus the random "all genes" sample) and
+#' gene_class_summary.csv, prints the most frequent false positives of the
+#' cross-fit arms, and plots the spread (raincloud) and precision / TPR by |v| decile.
+gene_diagnostics <- function(GC, VB) {
+  write.csv(GC, file.path(RCFG$out_dir, "gene_classes.csv"), row.names = FALSE)
+  # long form: FP, FN and the sample as "all" (a sampled FP counts in both)
+  L <- rbind(cbind(GC[GC$class %in% c("FP", "FN"), ], grp = GC$class[GC$class %in% c("FP", "FN")]),
+             cbind(GC[GC$sample, ], grp = rep("all", sum(GC$sample))))
+  L$grp <- factor(L$grp, c("all", "FN", "FP"))
+  key <- c("part", "n_rep", "pi1", "method", "grp")
+  med <- function(x) median(x, na.rm = TRUE)
+  sm <- merge(aggregate(cbind(n = gene) ~ ., L[c(key, "gene")], length),
+              aggregate(cbind(v, absv, spread) ~ ., L[c(key, "v", "absv", "spread")], med, na.action = na.pass))
+  write.csv(sm, file.path(RCFG$out_dir, "gene_class_summary.csv"), row.names = FALSE)
+  print_tab(sm[sm$method %in% c("TOX-log-xfit-js", "TOX-log-xfit-js-boot", "limma"), ],
+            "GENE CLASSES: median v (log2 variance / trend), |v| and spread of FN, FP vs all genes",
+            csv = "gene_class_summary.csv", keys = key)
+  fp <- GC[GC$class == "FP" & grepl("^TOX-log-xfit-js", GC$method), ]
+  if (nrow(fp)) {
+    top <- aggregate(cbind(n_rounds = round) ~ part + cohort + n_rep + method + gene, fp, length)
+    top <- merge(top, aggregate(cbind(absv, spread, expr) ~ part + cohort + n_rep + method + gene, fp,
+                                mean, na.action = na.pass))
+    top <- do.call(rbind, lapply(split(top, top[c("part", "cohort", "n_rep", "method")], drop = TRUE),
+                                 function(d) head(d[order(-d$n_rounds), ], 5)))
+    print_tab(top, "MOST FREQUENT FALSE POSITIVES (cross-fit arms; top 5 per cohort, n, arm; full list gene_classes.csv)",
+              keys = c("part", "cohort", "n_rep", "method"), n = 200L)
+  }
+  # expression spread: all (grey), FN (blue), FP (red), raincloud = violin + box + jittered points
+  sp <- L[is.finite(L$spread) & L$spread > 0, ]
+  for (pt in intersect(c("RS", "R"), unique(sp$part))) {
+    d <- sp[sp$part == pt & !sp$pi1 %in% 0, ]
+    if (!nrow(d)) next
+    set.seed(1L)
+    pts <- do.call(rbind, lapply(split(d, d[c("n_rep", "method", "grp")], drop = TRUE),
+                                 function(x) x[sample.int(nrow(x), min(nrow(x), 300L)), ]))
+    p <- ggplot(d, aes(grp, spread, fill = grp, colour = grp)) +
+      geom_violin(alpha = 0.35, scale = "width", width = 0.8, colour = NA) +
+      geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.6, colour = "grey20") +
+      geom_jitter(data = pts, width = 0.25, height = 0, size = 0.25, alpha = 0.35) +
+      scale_fill_manual(values = c(all = "grey60", FN = "#2a78d6", FP = "#e34948"), guide = "none") +
+      scale_colour_manual(values = c(all = "grey40", FN = "#2a78d6", FP = "#e34948"), guide = "none") +
+      scale_y_log10() + facet_grid(method ~ n_rep, labeller = labeller(n_rep = label_both)) +
+      labs(title = sprintf("Part %s: expression spread of all genes, false negatives and false positives (BH < 0.05)", pt),
+           subtitle = "spread = (max - min of the gene's own residuals) / (Q95 - Q05 of its neighbourhood pool), both as the test uses them. Power rounds.",
+           x = NULL, y = "expression spread (log scale)") +
+      PLOT_TH + theme(strip.text.y = element_text(angle = 0, size = 6))
+    save_plot(sprintf("expr_spread_raincloud_%s.png", pt), p, w = 10, h = 1.8 * length(unique(d$method)) + 2)
+  }
+  # precision and TPR of the BH calls by decile of |v| (0 = variance on the trend)
+  if (!is.null(VB) && nrow(VB)) {
+    d <- VB[VB$quantity == "absv" & VB$part %in% c("RS", "R") & !VB$pi1 %in% 0 & grepl(RCFG$gene_methods, VB$method), ]
+    if (nrow(d)) {
+      a <- aggregate(cbind(precision = 1 - false_share_05_mean, tpr = tpr_05_mean) ~ part + n_rep + method + decile, d, mean)
+      a <- rbind(cbind(a[1:4], metric = "precision", value = a$precision), cbind(a[1:4], metric = "TPR", value = a$tpr))
+      p <- ggplot(a, aes(decile, value, colour = method)) + geom_line() + geom_point(size = 1) +
+        facet_grid(metric ~ part + n_rep, scales = "free_y", labeller = label_both) +
+        labs(title = "Precision and TPR of the BH calls (< 0.05) by decile of |v| = |log2(variance / LOESS trend)|",
+             subtitle = "Decile 1 = variance closest to the trend. Mean over cohorts and rounds.",
+             x = "|v| decile", y = NULL, colour = NULL) + PLOT_TH
+      save_plot("absv_precision_tpr_by_decile.png", p, w = 14, h = 7)
+    }
+  }
+}
+
 if (sys.nframe() == 0L) {
   man <- read_manifests(RCFG$raw_dir)
   report_header(man)
@@ -1052,6 +1130,7 @@ if (sys.nframe() == 0L) {
   VBr <- do.call(rbind, lapply(res, `[[`, "vbins"))
   VEr <- do.call(rbind, lapply(res, `[[`, "venrich"))
   VFr <- do.call(rbind, lapply(res, `[[`, "vflag"))
+  GC  <- do.call(rbind, lapply(res, `[[`, "genes"))
 
   skip <- c(CELL, "round", "job", "seed", "split_seed", "sigma_mult")
   num_cols <- setdiff(names(M)[vapply(M, is.numeric, logical(1))], skip)
@@ -1105,5 +1184,6 @@ if (sys.nframe() == 0L) {
     message("report warning: ", conditionMessage(w)); invokeRestart("muffleWarning") })
   tryCatch(make_plots(M, CU, PR, ST, PT, BA), error = function(e) message("plotting failed: ", conditionMessage(e)))
   tryCatch(make_plots_fg(M, DC, VG$corr, VG$bins), error = function(e) message("plotting (F/G) failed: ", conditionMessage(e)))
+  if (!is.null(GC)) tryCatch(gene_diagnostics(GC, VG$bins), error = function(e) message("gene diagnostics: ", conditionMessage(e)))
   cat("\nWrote CSVs and plots to ", RCFG$out_dir, "/\n", sep = "")
 }

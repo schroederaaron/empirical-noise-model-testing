@@ -118,6 +118,10 @@ REAL_PARTS <- c("R", "RS")                   # parts drawn from the real cohorts
 # part never changes the datasets of the existing ones; ALL_PARTS only sets the order.
 SEED_PARTS <- c("R", "P", "P+", "Q", "C", "S", "N", "V", "D", "RS", "U")
 .env_parts <- Sys.getenv("POWER_PARTS", paste(ALL_PARTS, collapse = ","))
+#' Comma-separated environment list, `default` when unset.
+env_list <- function(var, default) {
+  v <- Sys.getenv(var, ""); if (nzchar(v)) trimws(strsplit(v, ",")[[1]]) else default
+}
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
 # Mean-dependent dispersion for P+ (I2). Estimated from the TCGA healthy cohorts by
@@ -167,6 +171,9 @@ PCFG <- list(
   # n_rounds stays the default of every other part), TOX comparator = Part R's.
   RS = list(n_reps = c(3L, 5L, 7L, 10L), pi1 = c(0, 0.10),     # n = 7, 10: note E v2 section 5
             n_rounds = as.integer(Sys.getenv("POWER_ROUNDS_RS", "50")),
+            # POWER_RS_GRID=1: Part RS runs Part R's input grid (plain grid arms and
+            # vmatch$grid_arms on every input) instead of the single comparator below.
+            grid = Sys.getenv("POWER_RS_GRID", "0") == "1",
             tox_arms = list(list(label = "TOX-log|TPM-centred", engine = "exact", norm = 1L, null = 0L,
                                  input = "tpm", centre = TRUE))),
   P = list(dists = c("nb", "lnpois", "tpois"), n_reps = c(3L, 5L, 10L), pi1 = 0.10),
@@ -196,7 +203,9 @@ PCFG <- list(
   disp_gene_sd   = 0.7,           # "gene": sd of log phi_g around log(disp)
   hv_factor      = 4,             # Part V: case-group dispersion multiplier
 
-  # Parts N and R: input x arm grid. src: "tpm" | "cnt" | "tmm" | "mor".
+  # Parts N and R (and RS with POWER_RS_GRID=1): input x arm grid. src: "tpm" |
+  # "cnt" | "tmm" | "mor". POWER_GRID_INPUTS / POWER_GRID_ARMS restrict both lists
+  # (e.g. the lean yeast run); the code of every arm stays.
   inputs = list(
     list(name = "TPM",            src = "tpm", centre = FALSE),
     list(name = "TPM-centred",    src = "tpm", centre = TRUE),
@@ -206,7 +215,8 @@ PCFG <- list(
     list(name = "MoR",            src = "mor", centre = FALSE)
   ),
   # TOX-log-boot is left out: it matched TOX-log in every Part P cell.
-  grid_arms = c("TOX-log", "TOX-log-blocked", "TOX-raw", "TOX-raw-blocked"),
+  grid_arms = env_list("POWER_GRID_ARMS", c("TOX-log", "TOX-log-blocked", "TOX-raw", "TOX-raw-blocked")),
+  n_boot = as.integer(Sys.getenv("POWER_N_BOOT", "10000")),   # variance arms with nullc = "bootstrap"
 
   run_edger  = TRUE,
   run_limma  = TRUE,
@@ -255,9 +265,11 @@ PCFG <- list(
   # chosen on the pi1 = 0 rounds only (power_report.R, note E v2 section 6).
   # `parts` restricts an arm; `rs_n` restricts it to these n in Part RS.
   vmatch = list(k = 50L, span = 0.3, degree = 1L, parts = c("P+", "V", "R", "RS", "U"),
-                # Part R only: these variance arms ALSO run on every input of the grid, as
-                # "<label>|<input>" (counts, TMM, MoR, ...), next to the plain TOX arms.
-                grid_arms = "TOX-log-xfit-js"),
+                # Parts R (and RS with the grid): these variance arms ALSO run on every other
+                # grid input as "<label>|<input>" (their own input, TPM-centred, is the plain
+                # label). They also export the neighbour genes of their false positives and
+                # false negatives (nbhd_<job>.csv.gz).
+                grid_arms = env_list("POWER_VGRID_ARMS", "TOX-log-xfit-js")),
   adapt  = list(block_size = 5L, k_min = 20L, tau_stab = 0.10, w_blocks = 2L, a_min = 0.2),
   vmatch_arms = local({
     four <- c("P+", "V", "R", "RS")
@@ -270,6 +282,10 @@ PCFG <- list(
       v("TOX-log-xfit-raw",      vmode = "mean", scaling = "xfit_raw"),
       v("TOX-log-xfit-js",       vmode = "mean", scaling = "xfit_js", target = "median"),
       v("TOX-log-xfit-js-loess", vmode = "mean", scaling = "xfit_js", target = "loess"),
+      # cross-fit JS with the bootstrap model's Monte Carlo difference-of-means null
+      # (PCFG$n_boot draws, floor 1/(n_boot + 1)); real data only (runtime)
+      v("TOX-log-xfit-js-boot",  vmode = "mean", scaling = "xfit_js", target = "median", nullc = "bootstrap",
+        parts = c("R", "RS")),
       v("TOX-log-xfit-js-nocf",  vmode = "mean", scaling = "same_group", target = "median",
         parts = c("RS", "P+"), rs_n = c(3L, 5L)),
       v("TOX-log-adapt-r0.25",   vmode = "adaptive", match = "raw", scaling = "none", c_tau = 3, r_max = 0.25, parts = four),
@@ -286,6 +302,8 @@ PCFG <- list(
   raw_dir = Sys.getenv("POWER_RAW_DIR", if (exists("TOX_TEST_DIR"))
               file.path(dirname(TOX_TEST_DIR), "power_raw") else "power_raw")
 )
+
+PCFG$inputs <- Filter(function(i) i$name %in% env_list("POWER_GRID_INPUTS", i$name), PCFG$inputs)
 
 RUN_TOX <- isTRUE(CFG$run_tox)
 if (!RUN_TOX) message("TOX wrappers not loaded -- running reference methods only.")
@@ -634,7 +652,9 @@ run_tox_arm <- function(mat, group, arm, tie, test_only = NULL) {
              k = arm[["k"]] %||% PCFG$vmatch$k, c_tau = arm$c_tau %||% 3, c_js = arm$c_js %||% 1,
              block_size = ad$block_size, k_min = min(ad$k_min, arm[["k"]] %||% PCFG$vmatch$k), r_max = arm$r_max %||% 0.5,
              tau_stab = ad$tau_stab, w_blocks = ad$w_blocks, a_min = ad$a_min,
-             loess_span = PCFG$vmatch$span, loess_degree = PCFG$vmatch$degree, max_pool_size = PCFG$max_pool)
+             loess_span = PCFG$vmatch$span, loess_degree = PCFG$vmatch$degree, max_pool_size = PCFG$max_pool,
+             null_construction = arm$nullc %||% "exact", n_boot = PCFG$n_boot,
+             neighbour_cap = if (isTRUE(arm$nbr)) kc$k_max else 0L)
   } else {
     fn <- if (arm$engine == "exact") tox_compute_noise_pvalues_pipeline_exact
           else tox_compute_noise_pvalues_pipeline
@@ -650,7 +670,8 @@ run_tox_arm <- function(mat, group, arm, tie, test_only = NULL) {
   padj <- rep(NA_real_, G); padj[!is.na(p)] <- p.adjust(p[!is.na(p)], "BH")
   nc <- res$neighborhood_size_own_case; nt <- res$neighborhood_size_own_control
   # Theoretical per-gene floor where it is known in closed form.
-  floor_th <- if (arm$engine %in% c("exact", "variance"))
+  floor_th <- if (identical(arm$nullc, "bootstrap")) rep(1 / (PCFG$n_boot + 1), G)
+              else if (arm$engine %in% c("exact", "variance"))
                 ifelse(nc > 0 & nt > 0, 1 / (as.numeric(nc) * nt + 1), NA_real_)
               else if (arm$null == 0L) rep(1 / 10001, G) else rep(NA_real_, G)   # N_BOOTSTRAP_DRAWS
   out <- data.frame(gene = rownames(mat), p = p, padj = padj, lfc = res$obs_own,
@@ -676,8 +697,24 @@ run_tox_arm <- function(mat, group, arm, tie, test_only = NULL) {
     out$vb_stop_case    <- na_neg(res$stop_own_case)
     out$vb_stop_control <- na_neg(res$stop_own_control)
     out$vb_radius_case  <- na_neg(res$radius_own_case)
+    out$expr_spread <- na_neg(res$expr_spread_own)
+    # neighbour genes (column indices of mat), for nbhd_rows(); not written per gene
+    if (!is.null(res$neighbours_own_case))
+      attr(out, "nbr") <- list(case = res$neighbours_own_case, control = res$neighbours_own_control)
   }
   out
+}
+
+#' Neighbour genes of one arm's false positives and false negatives (BH < 0.05):
+#' one row per gene and side, the neighbours as ";"-joined gene IDs (own gene first).
+nbhd_rows <- function(r, is_de) {
+  nb <- attr(r, "nbr"); if (is.null(nb)) return(NULL)
+  called <- !is.na(r$padj) & r$padj < 0.05
+  cls <- ifelse(called & !is_de, "FP", ifelse(!called & is_de, "FN", NA))
+  i <- which(!is.na(cls)); if (!length(i)) return(NULL)
+  ids <- function(m) apply(m[, i, drop = FALSE], 2, function(x) paste(r$gene[x[x > 0]], collapse = ";"))
+  data.frame(gene = rep(r$gene[i], 2), class = rep(cls[i], 2), side = rep(c("case", "control"), each = length(i)),
+             p = rep(r$p[i], 2), neighbours = c(ids(nb$case), ids(nb$control)))
 }
 
 #' Scan radius of the case-side band pool (note D WP4). The Fortran visits candidates
@@ -800,7 +837,9 @@ run_methods_power <- function(sim, part) {
   } else if (PCFG$run_deseq2) safe("DESeq2", ref_tag(run_deseq2(counts, grp)))
 
   diag <- NULL
-  if (RUN_TOX && part %in% c("N", "R")) {
+  grid <- part %in% c("N", "R") || (part == "RS" && isTRUE(PCFG$RS$grid))
+  vgrid <- function(a) a$label %in% PCFG$vmatch$grid_arms
+  if (RUN_TOX && grid) {
     # Input x arm grid. Every input sees the SAME genes (common_filter) and samples.
     mats <- list(tpm = tpm, cnt = counts, tmm = NULL, mor = NULL)
     mats$tmm <- tryCatch(tmm_cpm(counts), error = function(e) NULL)
@@ -812,10 +851,13 @@ run_methods_power <- function(sim, part) {
         ai <- modifyList(a, list(input = inp$src, centre = inp$centre))
         safe(paste0(a$label, "|", inp$name), run_tox_arm(mat, grp, ai, tie))
       }
-    if (part == "R") for (a in PCFG$vmatch_arms) if (a$label %in% PCFG$vmatch$grid_arms)
+    # variance grid arms on the other inputs (their own, TPM-centred, runs below)
+    if (part != "N") for (a in Filter(vgrid, PCFG$vmatch_arms))
       for (inp in PCFG$inputs) {
+        if (inp$src == "tpm" && inp$centre) next
         mat <- mats[[inp$src]]; if (is.null(mat)) next
-        safe(paste0(a$label, "|", inp$name), run_tox_arm(mat, grp, modifyList(a, list(centre = inp$centre)), tie))
+        safe(paste0(a$label, "|", inp$name),
+             run_tox_arm(mat, grp, modifyList(a, list(centre = inp$centre, nbr = TRUE)), tie))
       }
   } else if (RUN_TOX && part == "RS") {
     # Short arm list (note D WP3): Part R's comparator only, no input grid.
@@ -838,10 +880,13 @@ run_methods_power <- function(sim, part) {
     for (a in PCFG$vmatch_arms) {
       if (!is.null(a$parts) && !part %in% a$parts) next
       if (part == "RS" && !is.null(a$rs_n) && !n_rep %in% a$rs_n) next
-      safe(a$label, run_tox_arm(tpm, grp, modifyList(a, list(centre = part %in% REAL_PARTS)), tie))
+      safe(a$label, run_tox_arm(tpm, grp, modifyList(a, list(centre = part %in% REAL_PARTS, nbr = vgrid(a))), tie))
     }
     vdiag <- vdiag_frame(tpm, grp, "TPM")             # note G: method-independent
   }
+  is_de <- sim$is_de[keep]
+  nbhd <- do.call(rbind, lapply(names(out), function(m) {
+    x <- nbhd_rows(out[[m]], is_de); if (!is.null(x)) cbind(method = m, x) }))
 
   if (part == "Q" && RUN_TOX) {
     is_null <- !sim$is_de[keep]
@@ -852,7 +897,7 @@ run_methods_power <- function(sim, part) {
     diag <- tryCatch(run_diag_q(tpm, grp, sim$is_de[keep]), error = function(e) {
       message("    pool diagnostics failed: ", conditionMessage(e)); NULL })
   }
-  list(results = out, keep = keep, diag = diag, vdiag = vdiag, data_hash = mat_hash(counts))
+  list(results = out, keep = keep, diag = diag, vdiag = vdiag, nbhd = nbhd, data_hash = mat_hash(counts))
 }
 
 # =============================================================================
@@ -941,7 +986,8 @@ run_job <- function(job) {
     write_gz(bind_methods(rr$results), f("results"))
   if (!is.null(rr$diag)) write_gz(rr$diag, f("diag"))
   if (!is.null(rr$vdiag)) write_gz(rr$vdiag, f("vdiag"))
-  raw_bytes <- sum(file.size(Filter(file.exists, f(c("truth", "results", "diag", "vdiag")))))
+  if (!is.null(rr$nbhd)) write_gz(rr$nbhd, f("nbhd"))
+  raw_bytes <- sum(file.size(Filter(file.exists, f(c("truth", "results", "diag", "vdiag", "nbhd")))))
 
   num <- function(x) if (is.null(x)) NA_real_ else x
   # Scalars of the reference variance arms (note F): the band width of the band as

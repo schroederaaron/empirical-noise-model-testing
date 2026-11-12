@@ -13,7 +13,12 @@
 #   YEAST_GTF       yeast GTF for gene lengths (otherwise TPM = CPM, lengths = 1)
 #   PARTS           default "RS,R"
 #   POWER_ROUNDS_RS default 50
+#   N_BOOT          bootstrap draws of the variance-aware bootstrap arm, default 100000
 #   REBUILD=1       rebuild the cohorts even if they exist (e.g. after changing the dataset or GTF)
+# Lean arm set (11/11/2026): references, plain TOX-log (exact model, original kNN) and
+# the variance arms; TOX-log-xfit-js and TOX-log-xfit-js-boot on TPM-centred, TMM and
+# MoR in Parts RS and R. The blocked / raw / boot plain arms and the counts inputs
+# are not run here (their code stays; the TCGA scripts still run them).
 #
 # TUNE (guesses): --time / --mem.
 #SBATCH --job-name=yeast_power
@@ -57,6 +62,11 @@ fi
 set +e
 run --env POWER_PARTS="$PARTS" \
     --env POWER_ROUNDS_RS="${POWER_ROUNDS_RS:-50}" \
+    --env POWER_GRID_ARMS=TOX-log \
+    --env POWER_GRID_INPUTS=TPM-centred,TMM,MoR \
+    --env POWER_RS_GRID=1 \
+    --env POWER_VGRID_ARMS=TOX-log-xfit-js,TOX-log-xfit-js-boot \
+    --env POWER_N_BOOT="${N_BOOT:-100000}" \
     --env POWER_CORES="$CPUS" \
     --env POWER_REAL_RDS="$COH/yeast48_wt.rds,$COH/yeast48_snf2.rds" \
     --env POWER_RAW_DIR="$ROOT/yeast_power_raw" \

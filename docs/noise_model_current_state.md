@@ -288,6 +288,23 @@ else is `noise_model_exact`'s, reused rather than copied: Bessel-corrected resid
 
 With `variance_mode = "mean"` and `scaling = "none"` the model **is** the exact model (bit-identical).
 
+A fourth, optional switch picks the **null construction** from the (scaled) pools:
+`null_construction = "exact"` (default; every case × control residual pair, per-side `1/sqrt(n)`,
+exact tail count) or `"bootstrap"` (the bootstrap model's pooled null: `n_boot` draws of `n`
+residuals per side, averaged, `|mean_case − mean_control|`; add-one p-value, floor
+`1/(n_boot + 1)`; RNG seeded with 42 per call, sequential gene loop). With `"mean"`, `"none"` and
+`"bootstrap"` the model **is** the bootstrap model with `null_method = 0` (bit-identical at
+`n_boot = 10000`). The draw routine is `noise_model`'s `compute_pvalue_bootstrap_mean_helper`, reused.
+
+**Diagnostics (optional outputs, no effect on the p-values):**
+- `expr_spread_own`: per gene, `(max − min of its own residuals) / (Q95 − Q05 of its pool)`, both
+  sides pooled, nearest-rank quantiles, own residuals and pool as the test uses them (after a
+  scaling, before the per-side `1/sqrt(n)`); −1 when not computed.
+- `neighbours_own_case` / `_control` (`k_cap × n_genes`): the genes of each pool in the order they
+  were taken (own gene first), original gene indices, 0-padded. **Mean mode only** (zeros
+  otherwise): the genes are re-derived by replaying the gather's `find_closest_helper` /
+  `choose_index` walk for the pool's gene count.
+
 ### Shrinkage (James-Stein, moment-based)
 
 On the scale the model tests on (`y = log2(x + 1)`, or `y = x` with `norm_method = 0`):
@@ -366,8 +383,14 @@ subroutine compute_noise_pvalue_pipeline_variance( &
     n_accepted_own_case, n_accepted_own_control, &
     radius_own_case, radius_own_control, stop_own_case, stop_own_control, &
     match_u, s2s_pool, tau_var, scatter, shrink_diag, n_floored, ierr, &
-    lambda_fixed, target_fixed)   ! optional, tests only (not in the C ABI)
+    lambda_fixed, target_fixed, &   ! optional, tests only (not in the C ABI)
+    null_construction, n_boot, expr_spread_own, &         ! optional
+    neighbours_own_case, neighbours_own_control)          ! optional
 ```
+
+The C entry takes `null_construction`, `n_boot`, `neighbour_cap` and the outputs
+`expr_spread_own`, `neighbours_own_case`, `neighbours_own_control` (`max(1, neighbour_cap) x n_genes`)
+after `n_floored`, before `ierr`.
 
 C entry `compute_noise_pvalues_pipeline_variance_c`; Rcpp `tox_compute_noise_pvalues_pipeline_variance_rcpp`;
 R wrapper `tox_compute_noise_pvalues_pipeline_variance(case_replicates, control_replicates,
@@ -376,14 +399,16 @@ scaling = c("none", "xfit_raw", "xfit_js", "same_group"), shrink_target = c("med
 lambda_scale = c("relative", "absolute"), valid_genes_own = NULL, beta_centre = 0L, norm_method = 1L,
 k_start = 20L, k_step = 1L, k_max = 50L, tau = 0.1, k = 50L, c_tau = 1.5, c_js = 1.0,
 block_size = 5L, k_min = 20L, r_max = 0.5, tau_stab = 0.10, w_blocks = 2L, a_min = 0.2,
-loess_span = 0.3, loess_degree = 1L, loess_robust = TRUE, shrink_loess_robust = FALSE, max_pool_size)`.
+loess_span = 0.3, loess_degree = 1L, loess_robust = TRUE, shrink_loess_robust = FALSE, max_pool_size,
+null_construction = c("exact", "bootstrap"), n_boot = 10000L, neighbour_cap = 0L)`.
 It returns the p-values, `obs_own`, `log2fc`, `delta_hat`, `n_success`, the pool, band and adaptive
 diagnostics, `match_u`, `s2s_pool`, `tau_var`, `scatter`, `lambda_pool` / `_case` / `_control` and their
-`*_unclipped` ratios, `p_hat`, `participation_ratio`, `n_floored`, `ierr`.
+`*_unclipped` ratios, `p_hat`, `participation_ratio`, `n_floored`, `expr_spread_own`,
+`neighbours_own_case` / `_control` (when `neighbour_cap > 0`), `ierr`.
 
 ### Unit tests
 
-`test/mod_test_noise_model_variance.f90`, suite `noise_model_variance`, 15 tests:
+`test/mod_test_noise_model_variance.f90`, suite `noise_model_variance`, 17 tests:
 
 1. Trigamma and note A's `τ` values.
 2. A hand-built band gather.
@@ -402,3 +427,8 @@ diagnostics, `match_u`, `s2s_pool`, `tau_var`, `scatter`, `lambda_pool` / `_case
 9. Scale invariance (linear branch), the floor path, argument validation.
 10. Ellipse: the pool equals a brute-force search for the `k` nearest inside the ellipse (40 targets,
     3 shapes, k = 10 and 50); its stop reasons; pipeline runs with raw and JS matching.
+11. Bootstrap null: mean mode, no scaling, `"bootstrap"`, `n_boot = 10000` = the bootstrap model's
+    pooled null bit-for-bit.
+12. Diagnostics: p-values unchanged by them; exported neighbours start with the own gene, are
+    distinct, and genes × n = pool size; the spread equals an independent recomputation from the
+    exported neighbours; `null_construction` / `n_boot` validation.

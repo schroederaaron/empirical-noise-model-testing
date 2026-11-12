@@ -122,7 +122,9 @@ metrics_one <- function(res, is_de, true_lfc, n_de_total, is_hv = NULL, lfc_log2
     row[[paste0("tpr_nom_", s)]]  <- tp / max(1, P)
     row[[paste0("tpr_all_nom_", s)]] <- tp / max(1, n_de_total)
     row[[paste0("zero_disc_", s)]] <- as.integer(tp + fp == 0)
-    if (P == 0) row[[paste0("tpr_nom_", s)]] <- row[[paste0("tpr_all_nom_", s)]] <- NA_real_
+    # F1 = 2 TP / (2 TP + FP + FN): harmonic mean of precision and recall at BH < a
+    row[[paste0("f1_", s)]] <- 2 * tp / max(1, 2 * tp + fp + (P - tp))
+    if (P == 0) row[[paste0("tpr_nom_", s)]] <- row[[paste0("tpr_all_nom_", s)]] <- row[[paste0("f1_", s)]] <- NA_real_
   }
   # P(at least one BH call); under pi1 = 0 this is P(any false call) = the FDR.
   row$any_call_05 <- 1 - row$zero_disc_05

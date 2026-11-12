@@ -34,5 +34,17 @@ sbatch Yeast_test/slurm/yeast_knn.sbatch       # kNN configuration grid -> $ROOT
 # options: --export=ALL,YEAST_DATASET=<...>/yeast48_all.rds,YEAST_GTF=<gtf>,REBUILD=1
 ```
 
+**Arms (11/11/2026, lean set):** limma, edgeR, DESeq2; plain `TOX-log` (exact model, original kNN)
+on TPM-centred, TMM and MoR; all variance arms on TPM-centred; `TOX-log-xfit-js` and the
+variance-aware bootstrap `TOX-log-xfit-js-boot` (B = `N_BOOT`, default 100 000) also on TMM and
+MoR, in both Parts RS and R. Set by `POWER_GRID_ARMS`, `POWER_GRID_INPUTS`, `POWER_RS_GRID`,
+`POWER_VGRID_ARMS`, `POWER_N_BOOT` in the sbatch; the other plain arms are only switched off.
+
+**Per-gene outputs:** `gene_classes.csv` (every FP / FN at BH < 0.05 plus a random gene sample,
+with v, |v| and the expression spread), `gene_class_summary.csv`, the console list of the most
+frequent false positives, `expr_spread_raincloud_{RS,R}.png`, `absv_precision_tpr_by_decile.png`;
+the neighbour genes of each FP / FN of the two cross-fit grid arms are in the raw folder,
+`nbhd_<job>.csv.gz` (own gene first, ";"-joined).
+
 Rebuild the TOX library (Apptainer `./build.sh`) before the first run if the Fortran changed.
 Copy results to `Yeast_test/results/` (not versioned) for local analysis.

@@ -12,6 +12,14 @@
 #                        v  = log2(s2 / T(m))                                overall relative noise
 #   vdiag_round()      per round and method: A1 rank correlations, A2 FPR by decile
 #                      and top-5 % vs rest, A3 flag utility
+#   gene_classes()     per round and method: TP / FP / FN / TN per gene with v, |v|
+#                      and the expression spread; keeps FP, FN and a random sample
+#
+# |v| = |log2(s2 / T(m))| is the distance of a gene's variance from the LOESS trend
+# (0 = exactly on the trend). Its rank correlation with p (true negatives: do noisy
+# or quiet genes give false positives; DE genes: are on-trend genes found more
+# easily) and the call precision / TPR by |v| decile answer "are genes whose
+# variance is close to the smoothed variance more often true positives?".
 #
 # Group A = control, B = case (as labelled by the sampler). Each group is normalised
 # by its own LOESS trend at its own mean, so variance differences explained by a
@@ -50,6 +58,7 @@ vdiag_quantities <- function(vd) {
   vd$L <- log2(fl(vd$s2_A) / vd$T_A) - log2(fl(vd$s2_B) / vd$T_B)
   vd$absL <- abs(vd$L)
   vd$v <- log2(fl(vd$s2) / vd$T)
+  vd$absv <- abs(vd$v)
   vd
 }
 
@@ -60,10 +69,13 @@ vdiag_quantities <- function(vd) {
 vdiag_round <- function(vq, res, is_de, thr = NA_real_) {
   tn <- !is_de & !is.na(res$p) & is.finite(vq$L)
   sp <- function(q) if (sum(tn) > 10) suppressWarnings(stats::cor(q[tn], res$p[tn], method = "spearman")) else NA_real_
-  corr <- data.frame(rho_signed = sp(vq$L), rho_abs = sp(vq$absL), rho_overall = sp(vq$v), n_tn = sum(tn))
+  de <- is_de & !is.na(res$p) & is.finite(vq$absv)
+  corr <- data.frame(rho_signed = sp(vq$L), rho_abs = sp(vq$absL), rho_overall = sp(vq$v), rho_absv = sp(vq$absv),
+                     rho_absv_de = if (sum(de) > 10) suppressWarnings(stats::cor(vq$absv[de], res$p[de], method = "spearman"))
+                                   else NA_real_, n_tn = sum(tn))
 
   called <- !is.na(res$padj) & res$padj < 0.05
-  bins <- do.call(rbind, lapply(c("absL", "L", "v"), function(qn) {
+  bins <- do.call(rbind, lapply(c("absL", "L", "v", "absv"), function(qn) {
     q <- vq[[qn]]; ok <- !is.na(res$p) & is.finite(q)
     if (sum(ok) < 20) return(NULL)
     br <- unique(stats::quantile(q[ok], seq(0, 1, 0.1)))
@@ -73,7 +85,8 @@ vdiag_round <- function(vq, res, is_de, thr = NA_real_) {
       nc <- sum(called[i])
       data.frame(quantity = qn, decile = d, n_tn = length(t),
                  fpr_001 = mean(res$p[t] <= 0.001), fpr_01 = mean(res$p[t] <= 0.01), fpr_05 = mean(res$p[t] <= 0.05),
-                 n_called_05 = nc, false_share_05 = if (nc > 0) sum(called[i] & !is_de[i]) / nc else NA_real_)
+                 n_called_05 = nc, false_share_05 = if (nc > 0) sum(called[i] & !is_de[i]) / nc else NA_real_,
+                 tpr_05 = if (any(is_de[i])) mean(called[i][is_de[i]]) else NA_real_)
     }))
   }))
 
@@ -107,6 +120,20 @@ vdiag_round <- function(vq, res, is_de, thr = NA_real_) {
                   if (is.finite(thr)) fl_rows(is.finite(vq$absL) & vq$absL > thr, "null_calibrated"))
   }
   list(corr = corr, bins = bins, enrich = enrich, flag = flag)
+}
+
+#' Per-gene classes of one round and method (BH < 0.05): TP / FP / FN / TN with p,
+#' padj, log2fc, expression, v, |v| and the expression spread (NA when the method
+#' has none). Keeps every FP and FN and `n_sample` random genes (sample = TRUE, any
+#' class) as the "all genes" reference.
+gene_classes <- function(vq, res, is_de, expr, n_sample = 200L) {
+  called <- !is.na(res$padj) & res$padj < 0.05
+  cls <- ifelse(is_de, ifelse(called, "TP", "FN"), ifelse(called, "FP", "TN"))
+  smp <- seq_along(cls) %in% sample.int(length(cls), min(n_sample, length(cls)))
+  k <- cls %in% c("FP", "FN") | smp
+  data.frame(gene = res$gene, class = cls, sample = smp, p = res$p, padj = res$padj, log2fc = res$log2fc,
+             expr = expr, v = vq$v, absv = vq$absv,
+             spread = if (is.null(res$expr_spread)) NA_real_ else res$expr_spread)[k, ]
 }
 
 #' Enrichment of false positives in the flagged set: ratio of FPRs, top / rest,
