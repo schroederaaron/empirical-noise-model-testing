@@ -17,7 +17,8 @@
 #   REBUILD=1       rebuild the cohorts even if they exist (e.g. after changing the dataset or GTF)
 # Lean arm set (11/11/2026): references, plain TOX-log (exact model, original kNN) and
 # the variance arms; TOX-log-xfit-js and TOX-log-xfit-js-boot on TPM-centred, TMM and
-# MoR in Parts RS and R. The blocked / raw / boot plain arms and the counts inputs
+# MoR in Parts RS and R (TMM / MoR are valid here only because yeast lengths = 1, so
+# TPM = CPM; on length-normalised TPM they are not). The blocked / raw / boot plain arms and the counts inputs
 # are not run here (their code stays; the TCGA scripts still run them).
 #
 # TUNE (guesses): --time / --mem.
@@ -49,6 +50,7 @@ for f in "$DATASET" "$WORK/$S/power_test.R" "$WORK/$S/power_report.R" "$WORK/$Y/
 done
 GIT_COMMIT="$(git -C "$WORK/analysis" rev-parse HEAD 2>/dev/null || true)"
 echo "yeast_power: $(date -Is) host=$(hostname) cpus=$CPUS parts=$PARTS dataset=$DATASET commit=${GIT_COMMIT:-unknown}"
+echo "yeast_power: RS grid on, inputs TPM-centred,TMM,MoR, vgrid xfit-js + xfit-js-boot, n_boot=${N_BOOT:-100000}"
 
 cd "$WORK"
 mkdir -p .container-home
