@@ -170,13 +170,13 @@ Because the axes share no samples, drawing each axis independently reproduces th
 | `method_used` | path | when |
 |---|---|---|
 | 0 | **enumerated** — walk the joint space, exact tail count, floor `1/(∏_a S_a + 1)` | `∏_a S_a ≤ enum_max_product` |
-| 1 | **systematic** — fixed coprime stride per pool (the default sampler) | otherwise, `sampling_mode = 0` |
+| 1 | **systematic** — one fixed coprime stride over the joint atom index (the default sampler) | otherwise, `sampling_mode = 0` |
 | 2 | **RNG** — classical Monte Carlo | otherwise, `sampling_mode = 1` |
 | 3 | reserved for the convolution null | never produced yet |
 
 **Enumeration is in practice the `d = 1` regression path and little else.** `S_a` grows *quadratically* in the neighbourhood size, so larger `k` makes enumeration worse, not better: at `k = 15`, `n_rep = 3` the joint space is 2 025 at `d = 1` but already 4.1 × 10⁶ at `d = 2` and 8.3 × 10⁹ at `d = 3`. The branch is kept because that is where `d = 1` lives — it reproduces `noise_model_exact`'s `pvalues_own` bit-for-bit. Do not plan around it for multidimensional use; the threshold is evaluated on the **product**, not per axis, because each axis looks harmless in isolation.
 
-**Systematic sampling** walks each pool with a fixed stride chosen coprime to that pool's size, so the walk visits every entry before repeating and the marginals stay exactly balanced. It is deterministic and reproducible, needs no RNG and no seed, parallelises without stream splitting, and has lower variance than random draws at the same `M`. The caveat for the method text: `(1+B)/(M+1)` is justified as a *valid* Monte-Carlo p-value under **random** draws; under systematic sampling it is instead an approximation of the exact enumerated tail, and the error becomes a coverage error rather than a sampling error. Both samplers are implemented so they can be compared on the mock null.
+**Systematic sampling** walks the joint atom index `t` in `[0, prod_a S_a)` (one case/control pairing per axis) with a single fixed stride coprime to `prod_a S_a`, and decodes `t` per axis exactly as the enumerated path does. Coprimality makes the first `min(M, prod_a S_a)` draws distinct joint atoms. `t` and the stride are held as mixed-radix digits (one per axis, base `S_a`), so the product never has to fit in an integer. The stride's digits are `S_a` times the R_d (generalised golden-ratio) constants, so the draws spread over the product space like a low-discrepancy sequence; each gene starts at its own offset. It is deterministic and reproducible, needs no RNG and no seed, and parallelises without stream splitting. The caveat for the method text: `(1+B)/(M+1)` is justified as a *valid* Monte-Carlo p-value under **random** draws; under systematic sampling it is instead an approximation of the exact enumerated tail, and the error becomes a coverage error rather than a sampling error. Both samplers are implemented so they can be compared on the mock null.
 
 `p = (1 + #{D_std_null ≥ D_std_obs}) / (M + 1)` on the sampled paths, and `(count + 1)/(∏_a S_a + 1)` on the enumerated one.
 
@@ -223,7 +223,7 @@ n_rep_per_axis(n_axes)
 | `log2fc` | `(n_axes, n_genes)` | **output**, per-axis effect size `log2((mean_case + 1)/(mean_control + 1))`, as in the scalar modules; never centred |
 | `beta_centre` | scalar | `0` none (default); `1` subtract the per-axis median `beta_hat` across genes |
 | `null_method` | scalar | ABI parity only; **must be 0** (see below) |
-| `sampling_mode` | scalar | `0` systematic stride (default); `1` RNG |
+| `sampling_mode` | scalar | `0` systematic joint stride (default); `1` RNG |
 | `n_draws_max` | scalar | `M`, user-settable, default 2×10⁴; floor `1/(M+1)` |
 | `n_exceed_target` | scalar | Besag–Clifford stopping; `0` disables (default) |
 | `enum_max_product` | scalar, int64 | enumerate while `∏_a S_a ≤` this; `0` forces sampling |
@@ -259,7 +259,7 @@ Why correct at all: on TPM `log2FC = beta − Δ` with `Δ` identical for every 
 
 ### Unit tests
 
-`test/mod_test_noise_model_md.f90`, suite `noise_model_md`, 9 tests:
+`test/mod_test_noise_model_md.f90`, suite `noise_model_md`, 10 tests:
 
 1. The bit-exact `d = 1` enumerated reduction to `noise_model_exact`. It covers p-values, `beta_obs` and `delta_hat`, on both normalization branches. The fixture uses `n_case = 4` against `n_ctrl = 5`, so it also pins the **per-side** scaling.
 2. The pipeline's own `beta_obs` at `d = 1`, on both branches.
@@ -270,6 +270,7 @@ Why correct at all: on TPM `log2FC = beta − Δ` with `Δ` identical for every 
 7. Systematic vs RNG agreement.
 8. `beta_centre` median recovery. The offset is injected into axis-1 case replicates, and `delta_hat` must recover it while the centred statistic stays unchanged.
 9. Degenerate input: a thin axis, a zero-variance axis, `D = 0` (identical case and control replicates), a NaN replicate (rejected), and the validation error codes.
+10. Systematic vs exact enumeration on a null fixture with equal pool sizes on all sides (`M = 2×10⁴`; mean `|Δp|` < 0.005, max < 0.015).
 
 The scalar suite (`test/mod_test_noise_model.f90`, 9 tests) checks the returned statistic against an independent recomputation on all four normalization regimes. `test_pipeline_beta_centre` checks `delta_hat`, the centring, the agreement of both scalar modules, and the rejection of an unknown mode.
 
